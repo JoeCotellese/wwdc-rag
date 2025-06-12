@@ -5,14 +5,21 @@ from typing import List
 import requests
 import re
 import logging
+import click
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 # === CONFIG ===
 INPUT_FOLDER = "./transcripts"
 OUTPUT_FOLDER = "./rag-chunks"
+
+# Filepath for the checkpoint file
+CHECKPOINT_FILE = "checkpoint.json"
+
 
 def extract_json_from_text(text: str):
     """
@@ -28,7 +35,10 @@ def extract_json_from_text(text: str):
     json_text = match.group(0)
     return json.loads(json_text)
 
-def lmstudio_chunker_via_rest(markdown_text: str, model_name: str = "qwen/qwen3-14b") -> List[str]:
+
+def lmstudio_chunker_via_rest(
+    markdown_text: str, model_name: str = "qwen/qwen3-14b"
+) -> List[str]:
     """
     Use the LM Studio REST API to perform chunking of the markdown text.
     """
@@ -36,6 +46,7 @@ def lmstudio_chunker_via_rest(markdown_text: str, model_name: str = "qwen/qwen3-
     url = "http://localhost:11234/v1/chat/completions"
     prompt = (
         """
+/no_think
 You are an expert technical editor.
 
 Your task is to take the provided text (a transcript, article, or technical document) and break it into coherent, self-contained chunks.
@@ -60,9 +71,7 @@ Output format:
     )
     data = {
         "model": model_name,  # Use dynamic model name
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
+        "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 32768,
         "temperature": 0.6,
         "top_p": 0.95,
@@ -85,76 +94,32 @@ Output format:
     return chunks
 
 
-def generate_metadata(chunk_text: str) -> dict:
-    """
-    Stub function to generate metadata for a chunk.
-    """
-    logger.debug("Generating metadata for a chunk.")
-    return {
-        "chunk_title": "Observation in SwiftUI",
-        "keywords": ["SwiftUI", "Observation", "WWDC", "Apple"],
-        "summary": "This chunk discusses the Observation feature in SwiftUI introduced at WWDC 2023.",
-    }
-
-
 def safe_title(filename: str) -> str:
     """Convert filename to a safe folder name (no extension, spaces -> underscores)."""
     logger.debug(f"Converting filename '{filename}' to a safe title.")
     return pathlib.Path(filename).stem.replace(" ", "_")
 
 
-def process_all_markdown_files(input_folder: str, output_folder: str, model_name: str = "qwen/qwen3-14b"):
-    logger.info(f"Processing all markdown files in folder: {input_folder} with model: {model_name}")
-    for filename in os.listdir(input_folder):
-        if not filename.endswith(".md"):
-            logger.debug(f"Skipping non-markdown file: {filename}")
-            continue
+def save_progress(processed_files):
+    """Save the list of processed files to a checkpoint file."""
+    with open(CHECKPOINT_FILE, "w") as f:
+        json.dump({"processed_files": processed_files}, f)
 
-        logger.info(f"Processing file: {filename}")
-        file_path = os.path.join(input_folder, filename)
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
 
-        # Extract YEAR, TITLE, URL from header using regex
-        year, title, url = "", "", ""
-        header_match = re.search(
-            r"YEAR:\s*(.+)\nTITLE:\s*(.+)\nURL:\s*(.+)\n", content, re.IGNORECASE
-        )
-        if header_match:
-            year = header_match.group(1).strip()
-            title = header_match.group(2).strip()
-            url = header_match.group(3).strip()
-            logger.info(f"Extracted metadata - Year: {year}, Title: {title}, URL: {url}")
-        else:
-            logger.warning(f"Metadata not found in file: {filename}")
+def load_progress():
+    """Load the list of processed files from the checkpoint file."""
+    if os.path.exists(CHECKPOINT_FILE):
+        with open(CHECKPOINT_FILE, "r") as f:
+            return json.load(f).get("processed_files", [])
+    return []
 
-        talk_title = safe_title(filename)
-        chunks = lmstudio_chunker_via_rest(content, model_name)
-        logger.info(f"Generated {len(chunks)} chunks for file: {filename}")
 
-        talk_output_dir = os.path.join(output_folder, talk_title)
-        os.makedirs(talk_output_dir, exist_ok=True)
-        logger.info(f"Created output directory: {talk_output_dir}")
-
-        output_dict = {
-            "year": year,
-            "title": title,
-            "url": url,
-            "model": model_name,  # Add dynamic model name to metadata
-            "chunks": chunks
-        }
-        chunks_json_path = os.path.join(talk_output_dir, "chunks.json")
-        with open(chunks_json_path, "w", encoding="utf-8") as json_file:
-            json.dump(output_dict, json_file, indent=2)
-        logger.info(f"Saved chunks to: {chunks_json_path}")
-
-def process_single_markdown_file(input_folder: str, output_folder: str, target_file: str, model_name: str = "qwen/qwen3-14b"):
-    logger.info(f"Processing single markdown file: {target_file} with model: {model_name}")
-    file_path = os.path.join(input_folder, target_file)
-    if not os.path.exists(file_path):
-        logger.error(f"File '{file_path}' does not exist.")
-        return
-
+def process_markdown_file(
+    file_path: str, output_folder: str, model_name: str, processed_files: list
+):
+    """Helper function to process a single markdown file."""
+    filename = os.path.basename(file_path)
+    logger.info(f"Processing file: {filename}")
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
 
@@ -169,13 +134,19 @@ def process_single_markdown_file(input_folder: str, output_folder: str, target_f
         url = header_match.group(3).strip()
         logger.info(f"Extracted metadata - Year: {year}, Title: {title}, URL: {url}")
     else:
-        logger.warning(f"Metadata not found in file: {target_file}")
+        logger.warning(f"Metadata not found in file: {filename}")
 
-    talk_title = safe_title(target_file)
+    # Check if the file size exceeds the context window limit
+    max_context_window_size = 32768  # Example context window size in characters
+    if os.path.getsize(file_path) > max_context_window_size:
+        logger.error(f"File '{filename}' exceeds the context window size and will be skipped.")
+        return
+
+    talk_title = safe_title(filename)
     chunks = lmstudio_chunker_via_rest(content, model_name)
-    logger.info(f"Generated {len(chunks)} chunks for file: {target_file}")
+    logger.info(f"Generated {len(chunks)} chunks for file: {filename}")
 
-    talk_output_dir = os.path.join(output_folder, talk_title)
+    talk_output_dir = os.path.join(output_folder, model_name)
     os.makedirs(talk_output_dir, exist_ok=True)
     logger.info(f"Created output directory: {talk_output_dir}")
 
@@ -184,12 +155,102 @@ def process_single_markdown_file(input_folder: str, output_folder: str, target_f
         "title": title,
         "url": url,
         "model": model_name,  # Add dynamic model name to metadata
-        "chunks": chunks
+        "chunks": chunks,
     }
-    chunks_json_path = os.path.join(talk_output_dir, "chunks.json")
+    chunks_json_path = os.path.join(talk_output_dir, f"{talk_title}.json")
     with open(chunks_json_path, "w", encoding="utf-8") as json_file:
         json.dump(output_dict, json_file, indent=2)
     logger.info(f"Saved chunks to: {chunks_json_path}")
+
+    # Mark the file as processed and save progress
+    processed_files.append(filename)
+    save_progress(processed_files)
+
+
+def process_all_markdown_files(
+    input_folder: str, output_folder: str, model_name: str = "qwen/qwen3-14b"
+):
+    logger.info(
+        f"Processing all markdown files in folder: {input_folder} with model: {model_name}"
+    )
+
+    # Load previously processed files
+    processed_files = load_progress()
+
+    for filename in os.listdir(input_folder):
+        if not filename.endswith(".md"):
+            logger.debug(f"Skipping non-markdown file: {filename}")
+            continue
+
+        if filename in processed_files:
+            logger.info(f"Skipping already processed file: {filename}")
+            continue
+
+        file_path = os.path.join(input_folder, filename)
+        process_markdown_file(file_path, output_folder, model_name, processed_files)
+
+
+def process_single_markdown_file(
+    input_folder: str,
+    output_folder: str,
+    target_file: str,
+    model_name: str = "qwen/qwen3-14b",
+):
+    logger.info(
+        f"Processing single markdown file: {target_file} with model: {model_name}"
+    )
+    if not os.path.isabs(target_file) and not target_file.startswith(input_folder):
+        file_path = os.path.join(input_folder, target_file)
+    else:
+        file_path = target_file
+
+    if not os.path.exists(file_path):
+        logger.error(f"File '{file_path}' does not exist.")
+        return
+
+    # Load previously processed files
+    processed_files = load_progress()
+
+    if target_file in processed_files:
+        logger.info(f"Skipping already processed file: {target_file}")
+        return
+
+    process_markdown_file(file_path, output_folder, model_name, processed_files)
+
+
+@click.command()
+@click.option(
+    "--model_name",
+    default="qwen/qwen3-14b",
+    help="Name of the model to use for processing.",
+)
+@click.option(
+    "--restart",
+    is_flag=True,
+    default=False,
+    help="Restart processing from the beginning, ignoring checkpoints.",
+)
+@click.option(
+    "--file",
+    "target_file",
+    default=None,
+    help="Process a single markdown file instead of all files.",
+)
+def main(model_name: str, restart: bool, target_file: str):
+    """Main function to process markdown files with command-line arguments."""
+    if restart:
+        logger.info("Restarting processing and clearing checkpoint file.")
+        if os.path.exists(CHECKPOINT_FILE):
+            os.remove(CHECKPOINT_FILE)
+
+    if target_file:
+        logger.info(f"Processing single file: {target_file} with model: {model_name}")
+        process_single_markdown_file(
+            INPUT_FOLDER, OUTPUT_FOLDER, target_file, model_name
+        )
+    else:
+        logger.info(f"Starting processing with model: {model_name}")
+        process_all_markdown_files(INPUT_FOLDER, OUTPUT_FOLDER, model_name)
 
 
 # if __name__ == "__main__":
@@ -198,9 +259,4 @@ def process_single_markdown_file(input_folder: str, output_folder: str, target_f
 #     process_single_markdown_file(INPUT_FOLDER, OUTPUT_FOLDER, TARGET_FILE)
 
 if __name__ == "__main__":
-    model_name = "qwen/qwen3-14b"  # Define the model name here
-    logger.info(f"Starting processing of markdown files with model: {model_name}")
-    process_all_markdown_files(INPUT_FOLDER, OUTPUT_FOLDER, model_name)
-    logger.info("Finished processing markdown files.")
-    process_all_markdown_files(INPUT_FOLDER, OUTPUT_FOLDER)
-    logger.info("Finished processing markdown files.")
+    main()
