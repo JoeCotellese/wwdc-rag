@@ -134,3 +134,4 @@ cython_debug/
 # Ignore transcripts folder
 transcripts/
 rag-chunks/
+checkpoint.json
