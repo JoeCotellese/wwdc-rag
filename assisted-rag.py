@@ -77,7 +77,7 @@ Output format:
         "top_p": 0.95,
         "top_k": 20,
         "stop": None,
-        "gpu": 1.0
+        "gpu": 1.0,
     }
     try:
         response = requests.post(url, json=data)
@@ -115,6 +115,23 @@ def load_progress():
     return []
 
 
+def load_progress_filecheck(input_folder: str, output_folder: str) -> set:
+    """Load processed files by comparing source and destination files."""
+    processed_files = set()
+
+    input_files = set(os.listdir(input_folder))
+    output_files = {
+        os.path.splitext(f)[0] for f in os.listdir(output_folder)
+    }  # Remove extensions
+
+    for file in input_files:
+        file_stem = os.path.splitext(file)[0]  # Get the stem of the file
+        if file_stem in output_files:
+            processed_files.add(file)
+
+    return processed_files
+
+
 def process_markdown_file(
     file_path: str, output_folder: str, model_name: str, processed_files: list
 ):
@@ -140,7 +157,9 @@ def process_markdown_file(
     # Check if the file size exceeds the context window limit
     max_context_window_size = 32768  # Example context window size in characters
     if os.path.getsize(file_path) > max_context_window_size:
-        logger.error(f"File '{filename}' exceeds the context window size and will be skipped.")
+        logger.error(
+            f"File '{filename}' exceeds the context window size and will be skipped."
+        )
         return
 
     talk_title = safe_title(filename)
@@ -176,7 +195,10 @@ def process_all_markdown_files(
     )
 
     # Load previously processed files
-    processed_files = load_progress()
+    # processed_files = load_progress()
+    processed_files = load_progress_filecheck(
+        input_folder=input_folder, output_folder=output_folder
+    )
 
     for filename in os.listdir(input_folder):
         if not filename.endswith(".md"):
@@ -197,26 +219,27 @@ def process_single_markdown_file(
     target_file: str,
     model_name: str = "qwen/qwen3-14b",
 ):
-    logger.info(
-        f"Processing single markdown file: {target_file} with model: {model_name}"
-    )
+    """Process a single markdown file."""
+    # Handle absolute or relative file paths
     if not os.path.isabs(target_file) and not target_file.startswith(input_folder):
         file_path = os.path.join(input_folder, target_file)
     else:
         file_path = target_file
 
+    filename = os.path.basename(file_path)  # Extract the filename
+
     if not os.path.exists(file_path):
         logger.error(f"File '{file_path}' does not exist.")
         return
 
-    # Load previously processed files
-    processed_files = load_progress()
-
-    if target_file in processed_files:
-        logger.info(f"Skipping already processed file: {target_file}")
+    # Check if the corresponding output file exists
+    output_file_path = os.path.join(output_folder, model_name, f"{os.path.splitext(filename)[0]}.json")
+    if os.path.exists(output_file_path):
+        logger.info(f"Skipping already processed file: {filename}")
         return
 
-    process_markdown_file(file_path, output_folder, model_name, processed_files)
+    logger.info(f"Processing single markdown file: {file_path} with model: {model_name}")
+    process_file(file_path, model_name)
 
 
 @click.command()
@@ -253,11 +276,6 @@ def main(model_name: str, restart: bool, target_file: str):
         logger.info(f"Starting processing with model: {model_name}")
         process_all_markdown_files(INPUT_FOLDER, OUTPUT_FOLDER, model_name)
 
-
-# if __name__ == "__main__":
-#     # Temporarily process only the specified file
-#     TARGET_FILE = "wwdc2025-245-What_s_new_in_Swift_-_WWDC25_-_Videos_-_Apple_Developer.md"
-#     process_single_markdown_file(INPUT_FOLDER, OUTPUT_FOLDER, TARGET_FILE)
 
 if __name__ == "__main__":
     main()
