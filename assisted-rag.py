@@ -115,19 +115,31 @@ def load_progress():
     return []
 
 
-def load_progress_filecheck(input_folder: str, output_folder: str) -> set:
+def normalize_folder_path(folder: str) -> str:
+    """Normalize folder paths to remove redundant structures."""
+    return os.path.normpath(folder)
+
+
+def load_progress_filecheck(input_folder: str, output_folder: str) -> list:
     """Load processed files by comparing source and destination files."""
-    processed_files = set()
+    processed_files = []
+
+    # Normalize folder paths
+    input_folder = normalize_folder_path(input_folder)
+    output_folder = normalize_folder_path(output_folder)
 
     input_files = set(os.listdir(input_folder))
-    output_files = {
-        os.path.splitext(f)[0] for f in os.listdir(output_folder)
-    }  # Remove extensions
+    output_files = set()
+
+    # Traverse subdirectories in the output folder
+    for root, _, files in os.walk(output_folder):
+        for file in files:
+            output_files.add(os.path.splitext(file)[0])  # Add stem of the file
 
     for file in input_files:
         file_stem = os.path.splitext(file)[0]  # Get the stem of the file
         if file_stem in output_files:
-            processed_files.add(file)
+            processed_files.append(file)
 
     return processed_files
 
@@ -242,6 +254,16 @@ def process_single_markdown_file(
     process_file(file_path, model_name)
 
 
+def process_file(file_path: str, model_name: str):
+    """Wrapper for processing a single markdown file."""
+    process_markdown_file(
+        file_path=file_path,
+        output_folder=OUTPUT_FOLDER,
+        model_name=model_name,
+        processed_files=list(load_progress_filecheck(INPUT_FOLDER, OUTPUT_FOLDER)),
+    )
+
+
 @click.command()
 @click.option(
     "--model_name",
@@ -268,9 +290,12 @@ def main(model_name: str, restart: bool, target_file: str):
             os.remove(CHECKPOINT_FILE)
 
     if target_file:
-        logger.info(f"Processing single file: {target_file} with model: {model_name}")
-        process_single_markdown_file(
-            INPUT_FOLDER, OUTPUT_FOLDER, target_file, model_name
+        logger.info(
+            f"Processing single file: {target_file} with model: {model_name}"
+        )
+
+        processed_files=list(
+            load_progress_filecheck(INPUT_FOLDER, OUTPUT_FOLDER)
         )
     else:
         logger.info(f"Starting processing with model: {model_name}")
