@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import logging
 import time
+import click
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -38,17 +39,8 @@ def extract_transcript(url):
     # Group sentences by paragraph (<p>)
     paragraphs = []
     for p in transcript_section.find_all("p"):
-        sentences = [
-            span.get_text(strip=True)
-            for span in p.find_all("span")
-            if span.get("data-start")
-        ]
-        if sentences:
-            paragraph_text = " ".join(sentences)
-            paragraphs.append(paragraph_text)
+        paragraphs.append(p.get_text(strip=True))
 
-    # Convert to Markdown (double newlines for paragraph breaks)
-    markdown_output = "\n\n".join(paragraphs)
     logger.info(f"Transcript successfully extracted for URL: {url}")
 
     # Return the transcript object
@@ -56,7 +48,7 @@ def extract_transcript(url):
         "year": year,
         "number": number,
         "talk_title": talk_title,
-        "transcript": markdown_output,
+        "transcript": "\n".join(paragraphs),
         "url": url,  # Include the URL in the transcript object
     }
 
@@ -110,10 +102,13 @@ def save_transcript(transcript_object):
     logger.info(f"Transcript saved to {filepath}")
 
 
-if __name__ == "__main__":
-    base_url = "https://developer.apple.com/videos/wwdc2025/"
-    logger.info("Starting transcript extraction process")
+@click.command()
+@click.option('--base_url', required=True, help='Base URL to fetch video links.')
+def main(base_url):
+    """Main function to extract transcripts from a base URL."""
+    logger.info(f"Starting transcript extraction process for base URL: {base_url}")
     links = get_video_links(base_url)
+
     for link in links:
         transcript_object = extract_transcript(link)
         if transcript_object:
@@ -124,3 +119,20 @@ if __name__ == "__main__":
         else:
             logger.warning("Transcript extraction failed for one or more links")
         time.sleep(1)  # Add a 1-second delay between requests
+
+
+if __name__ == "__main__":
+    main()
+    # base_url = "https://developer.apple.com/videos/wwdc2025/"
+    # logger.info("Starting transcript extraction process")
+    # links = get_video_links(base_url)
+    # for link in links:
+    #     transcript_object = extract_transcript(link)
+    #     if transcript_object:
+    #         logger.info(
+    #             f"Transcript extraction completed successfully: {transcript_object['talk_title']}"
+    #         )
+    #         save_transcript(transcript_object)
+    #     else:
+    #         logger.warning("Transcript extraction failed for one or more links")
+    #     time.sleep(1)  # Add a 1-second delay between requests
