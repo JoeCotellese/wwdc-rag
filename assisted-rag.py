@@ -77,6 +77,7 @@ Output format:
         "top_p": 0.95,
         "top_k": 20,
         "stop": None,
+        "gpu": 1.0
     }
     try:
         response = requests.post(url, json=data)
