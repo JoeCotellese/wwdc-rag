@@ -6,6 +6,15 @@ import requests
 import re
 import logging
 import click
+from transformers import AutoTokenizer
+
+tokenizer = None
+def get_tokenizer(model_name):
+    global tokenizer
+    if tokenizer is None:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8b")
+    return tokenizer
 
 # Configure logging
 logging.basicConfig(
@@ -37,7 +46,7 @@ def extract_json_from_text(text: str):
 
 
 def lmstudio_chunker_via_rest(
-    markdown_text: str, model_name: str = "qwen/qwen3-14b"
+    markdown_text: str, model_name: str = "qwen3:8b"
 ) -> List[str]:
     """
     Use the LM Studio REST API to perform chunking of the markdown text.
@@ -46,10 +55,14 @@ def lmstudio_chunker_via_rest(
     url = "http://localhost:11434/v1/chat/completions"
     prompt = (
         """
-/no_think
-You are an expert technical editor.
-
-Your task is to take the provided text (a transcript, article, or technical document) and break it into coherent, self-contained chunks.
+<context>
+        You are an expert technical editor.
+        /no_think
+</context>
+<task>
+Your task is to take the provided text (a transcript, article, or technical 
+document) and break it into coherent, self-contained chunks. These chunk are 
+used for RAG.
 
 Each chunk should:
 - Focus on a single topic or subtopic
@@ -66,19 +79,20 @@ Output format:
   },
   ...
 ]
-"""
-        + markdown_text
+</task>
+<input>{markdown_text}</input>"""
     )
+
     data = {
-        "model": model_name,  # Use dynamic model name
+        "model": model_name,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "top_p": 0.8,
-        "top_k": 20,
-        "min_p": 0,
-        "stop": None,
-        "max_tokens": 4096,
-        "gpu": 1.0,
+        "options": {
+            "num_ctx": 40960,
+            "num_predict": 32768,
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "top_k": 20,
+        },
     }
     try:
         response = requests.post(url, json=data)
@@ -90,9 +104,11 @@ Output format:
         completion_text = result_json["choices"][0]["message"]["content"]
         chunks = extract_json_from_text(completion_text)
     except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
-        logger.error(f"Error during LM Studio REST API call or JSON parsing: {e}")
+        logger.error(
+            f"Error during LM Studio REST API call or JSON parsing: {e}")
+        logger.warning(
+            f"Raw LLM output (last 2000 chars):\n{completion_text[-2000:]}")
         return []
-
     return chunks
 
 
@@ -145,49 +161,39 @@ def load_progress_filecheck(input_folder: str, output_folder: str) -> list:
     return processed_files
 
 
-def split_by_tokens(content: str, max_tokens: int = 20000) -> List[str]:
-    """
-    Split content based on an estimated token count rather than character
-    count.
-    Uses a conservative estimate of characters per token.
-    """
-    # Estimate: 1 token ≈ 4 characters for English text (rough approximation)
-    char_per_token = 4
-    max_chars = max_tokens * char_per_token
-
+def split_text_by_tokens(text, max_tokens=2048, overlap=200, model_name="qwen3:8b"):
+    token_ids = get_tokenizer(model_name).encode(text)
     chunks = []
-    while len(content) > max_chars:
-        # Try to split at paragraph boundary
-        split_point = content.rfind("\n\n", 0, max_chars)
-        if split_point == -1:
-            # Try to split at line boundary
-            split_point = content.rfind("\n", 0, max_chars)
-        if split_point == -1:
-            # Try to split at sentence boundary
-            split_point = content.rfind(". ", 0, max_chars)
-        if split_point == -1:
-            # Last resort: split at character
-            split_point = max_chars
 
-        chunks.append(content[:split_point].strip())
-        content = content[split_point:].strip()
-
-    if content:  # Add remaining content if not empty
-        chunks.append(content)
-
+    for start in range(0, len(token_ids), max_tokens - overlap):
+        end = min(start + max_tokens, len(token_ids))
+        chunk_text = get_tokenizer(model_name).decode(token_ids[start:end])
+        chunks.append(chunk_text)
+    logger.info(f"Split text into {len(chunks)} chunks based on token count.")
+    if not chunks:
+        logger.warning("No chunks created from the text.")
+        return []
     return chunks
 
 
+
+def split_by_tokens(content: str, max_tokens: int = 20000, model_name: str = "qwen3:8b") -> List[str]:
+    """
+    Split content into chunks based on token count.
+    """
+    return split_text_by_tokens(content, max_tokens=max_tokens, overlap=200, model_name=model_name)
+
+
 def process_with_retry(
-    content: str,
-    model_name: str,
-    max_retries: int = 3
+    content: str, model_name: str, max_retries: int = 3
 ) -> List[dict]:
     """
     Process content with progressive splitting on failure.
     Automatically splits content into smaller chunks on API errors.
     """
-    logger.info(f"Starting process_with_retry. Initial content length: {len(content)} characters")
+    logger.info(
+        f"Starting process_with_retry. Initial content length: {len(content)} characters"
+    )
     current_chunks = [content]
     results = []
 
@@ -206,25 +212,21 @@ def process_with_retry(
                     # If no results, split the chunk further
                     logger.warning(
                         f"No results returned for chunk. Splitting further. "
-                        f"Retry {retry+1}/{max_retries}"
+                        f"Retry {retry + 1}/{max_retries}"
                     )
                     # Split into smaller chunks based on token estimate
                     new_chunk_size = 20000 - (retry * 5000)  # Reduce size
-                    new_chunks.extend(
-                        split_by_tokens(chunk, max_tokens=new_chunk_size)
-                    )
+                    new_chunks.extend(split_by_tokens(chunk, max_tokens=new_chunk_size, model_name=model_name))
                     success = False
             except Exception as e:
                 # If processing fails, split the chunk further
                 logger.warning(
                     f"Processing failed, splitting chunk further: {e}. "
-                    f"Retry {retry+1}/{max_retries}"
+                    f"Retry {retry + 1}/{max_retries}"
                 )
                 # Split into smaller chunks based on token estimate
                 new_chunk_size = 20000 - (retry * 5000)  # Reduce size
-                new_chunks.extend(
-                    split_by_tokens(chunk, max_tokens=new_chunk_size)
-                )
+                new_chunks.extend(split_by_tokens(chunk, max_tokens=new_chunk_size, model_name=model_name))
                 success = False
 
         if success or not new_chunks:
@@ -242,13 +244,13 @@ def process_with_retry(
     return results
 
 
-def split_large_file(content: str, max_size: int) -> List[str]:
+def split_large_file(content: str, max_size: int, model_name: str) -> List[str]:
     """
     Split a large file into smaller chunks that fit within the context
     window size. Uses token-based splitting for better accuracy.
     """
     # Use token-based splitting instead of character-based
-    return split_by_tokens(content, max_tokens=20000)
+    return split_by_tokens(content, max_tokens=20000, model_name=model_name)
 
 
 def process_markdown_file(
@@ -270,23 +272,19 @@ def process_markdown_file(
         year = header_match.group(1).strip()
         title = header_match.group(2).strip()
         url = header_match.group(3).strip()
-        logger.info(
-            f"Extracted metadata - Year: {year}, Title: {title}, URL: {url}"
-        )
+        logger.info(f"Extracted metadata - Year: {year}, Title: {title}, URL: {url}")
     else:
         logger.warning(f"Metadata not found in file: {filename}")
 
     # Process content with progressive splitting
     logger.info(f"Processing content for file: {filename}")
-    
+
     # Use our new token-based approach with retries
     all_chunks = process_with_retry(content, model_name, max_retries=3)
-    
+
     # If processing completely failed, log an error
     if not all_chunks:
-        logger.error(
-            f"Failed to process file '{filename}' after multiple attempts"
-        )
+        logger.error(f"Failed to process file '{filename}' after multiple attempts")
         all_chunks = []
 
     logger.info(f"Generated {len(all_chunks)} chunks for file: {filename}")
@@ -295,10 +293,10 @@ def process_markdown_file(
     source = "wwdc"
     # Extract numeric year from the year field (e.g., "wwdc2023" -> "2023")
     numeric_year = ""
-    year_match = re.search(r'wwdc(\d{4})', year)
+    year_match = re.search(r"wwdc(\d{4})", year)
     if year_match:
         numeric_year = year_match.group(1)
-    
+
     # Add metadata to each chunk
     for chunk in all_chunks:
         chunk["source"] = source
@@ -316,9 +314,7 @@ def process_markdown_file(
         "model": model_name,  # Add dynamic model name to metadata
         "chunks": all_chunks,
     }
-    chunks_json_path = os.path.join(
-        talk_output_dir, f"{safe_title(filename)}.json"
-    )
+    chunks_json_path = os.path.join(talk_output_dir, f"{safe_title(filename)}.json")
     with open(chunks_json_path, "w", encoding="utf-8") as json_file:
         json.dump(output_dict, json_file, indent=2)
     logger.info(f"Saved chunks to: {chunks_json_path}")
@@ -369,9 +365,7 @@ def process_single_markdown_file(
 ):
     """Process a single markdown file."""
     # Handle absolute or relative file paths
-    if not os.path.isabs(target_file) and not target_file.startswith(
-        input_folder
-    ):
+    if not os.path.isabs(target_file) and not target_file.startswith(input_folder):
         file_path = os.path.join(input_folder, target_file)
     else:
         file_path = target_file
@@ -397,9 +391,7 @@ def process_single_markdown_file(
         f"with model: {model_name}" + (f" (force={force})" if force else "")
     )
 
-    processed_files = list(
-        load_progress_filecheck(INPUT_FOLDER, OUTPUT_FOLDER)
-    )
+    processed_files = list(load_progress_filecheck(INPUT_FOLDER, OUTPUT_FOLDER))
 
     # Use processed_files in the logic
     if processed_files:
@@ -416,16 +408,14 @@ def process_file(file_path: str, model_name: str, force: bool = False):
         file_path=file_path,
         output_folder=OUTPUT_FOLDER,
         model_name=model_name,
-        processed_files=list(
-            load_progress_filecheck(INPUT_FOLDER, OUTPUT_FOLDER)
-        ),
+        processed_files=list(load_progress_filecheck(INPUT_FOLDER, OUTPUT_FOLDER)),
     )
 
 
 @click.command()
 @click.option(
     "--model_name",
-    default="qwen/qwen3-14b",
+    default="qwen3:8b",
     help="Name of the model to use for processing.",
 )
 @click.option(
@@ -460,13 +450,9 @@ def main(model_name: str, restart: bool, target_file: str, force: bool):
         )
 
         # Get list of already processed files to check against
-        processed_files = list(
-            load_progress_filecheck(INPUT_FOLDER, OUTPUT_FOLDER)
-        )
+        processed_files = list(load_progress_filecheck(INPUT_FOLDER, OUTPUT_FOLDER))
         if processed_files:
-            logger.info(
-                f"Found {len(processed_files)} already processed files."
-            )
+            logger.info(f"Found {len(processed_files)} already processed files.")
         process_single_markdown_file(
             INPUT_FOLDER,
             OUTPUT_FOLDER,
