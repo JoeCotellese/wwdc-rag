@@ -386,13 +386,15 @@ def process_single_markdown_file(
     output_file_path = os.path.join(
         output_folder, model_name, f"{os.path.splitext(filename)[0]}.json"
     )
-    if os.path.exists(output_file_path):
+    if os.path.exists(output_file_path) and not force:
         logger.info(f"Skipping already processed file: {filename}")
         return
+    elif os.path.exists(output_file_path) and force:
+        logger.info(f"Force flag enabled, reprocessing file: {filename}")
 
     logger.info(
         f"Processing single markdown file: {file_path} "
-        f"with model: {model_name}"
+        f"with model: {model_name}" + (f" (force={force})" if force else "")
     )
 
     processed_files = list(
@@ -405,10 +407,10 @@ def process_single_markdown_file(
         for file in processed_files:
             logger.debug(f"Already processed: {file}")
 
-    process_file(file_path, model_name)
+    process_file(file_path, model_name, force=force)
 
 
-def process_file(file_path: str, model_name: str):
+def process_file(file_path: str, model_name: str, force: bool = False):
     """Wrapper for processing a single markdown file."""
     process_markdown_file(
         file_path=file_path,
@@ -453,7 +455,8 @@ def main(model_name: str, restart: bool, target_file: str, force: bool):
 
     if target_file:
         logger.info(
-            f"Processing single file: {target_file} with model: {model_name} (force={force})"
+            f"Processing single file: {target_file} "
+            f"with model: {model_name} (force={force})"
         )
 
         # Get list of already processed files to check against
