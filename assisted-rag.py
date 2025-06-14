@@ -28,7 +28,7 @@ def extract_json_from_text(text: str):
     """
     logger.debug("Extracting JSON from text.")
     # Regex to find JSON array (starting with [ and ending with ])
-    json_array_pattern = re.compile(r"\[\s*{.*?}\s*\]", re.DOTALL)
+    json_array_pattern = re.compile(r"\[\s*{.*}\s*\]", re.DOTALL)
     match = json_array_pattern.search(text)
     if not match:
         raise json.JSONDecodeError("No JSON array found", text, 0)
@@ -43,7 +43,7 @@ def lmstudio_chunker_via_rest(
     Use the LM Studio REST API to perform chunking of the markdown text.
     """
     logger.info(f"Using model: {model_name}")
-    url = "http://localhost:11234/v1/chat/completions"
+    url = "http://localhost:11434/v1/chat/completions"
     prompt = (
         """
 /no_think
@@ -72,14 +72,13 @@ Output format:
     data = {
         "model": model_name,  # Use dynamic model name
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 32768,
-        "max_context_length": 32768,
         "temperature": 0.7,
         "top_p": 0.8,
         "top_k": 20,
         "min_p": 0,
         "stop": None,
-        "gpu": 2.0,
+        "max_tokens": 4096,
+        "gpu": 1.0,
     }
     try:
         response = requests.post(url, json=data)
@@ -188,6 +187,7 @@ def process_with_retry(
     Process content with progressive splitting on failure.
     Automatically splits content into smaller chunks on API errors.
     """
+    logger.info(f"Starting process_with_retry. Initial content length: {len(content)} characters")
     current_chunks = [content]
     results = []
 
@@ -201,6 +201,7 @@ def process_with_retry(
                 chunk_result = lmstudio_chunker_via_rest(chunk, model_name)
                 if chunk_result:  # Only add if we got valid results
                     results.extend(chunk_result)
+                    logger.info(f"Chunk result count: {len(chunk_result)}")
                 else:
                     # If no results, split the chunk further
                     logger.warning(
@@ -258,6 +259,7 @@ def process_markdown_file(
     logger.info(f"Processing file: {filename}")
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
+    logger.info(f"Loaded content length: {len(content)} characters")
 
     # Extract YEAR, TITLE, URL from header using regex
     year, title, url = "", "", ""
@@ -286,8 +288,22 @@ def process_markdown_file(
             f"Failed to process file '{filename}' after multiple attempts"
         )
         all_chunks = []
-        
+
     logger.info(f"Generated {len(all_chunks)} chunks for file: {filename}")
+
+    # Extract source as "wwdc" from the year field
+    source = "wwdc"
+    # Extract numeric year from the year field (e.g., "wwdc2023" -> "2023")
+    numeric_year = ""
+    year_match = re.search(r'wwdc(\d{4})', year)
+    if year_match:
+        numeric_year = year_match.group(1)
+    
+    # Add metadata to each chunk
+    for chunk in all_chunks:
+        chunk["source"] = source
+        chunk["year"] = numeric_year
+        chunk["url"] = url
 
     talk_output_dir = os.path.join(output_folder, model_name)
     os.makedirs(talk_output_dir, exist_ok=True)
@@ -349,6 +365,7 @@ def process_single_markdown_file(
     output_folder: str,
     target_file: str,
     model_name: str = "qwen/qwen3-14b",
+    force: bool = False,
 ):
     """Process a single markdown file."""
     # Handle absolute or relative file paths
@@ -421,7 +438,13 @@ def process_file(file_path: str, model_name: str):
     default=None,
     help="Process a single markdown file instead of all files.",
 )
-def main(model_name: str, restart: bool, target_file: str):
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Force reprocessing of the file even if output already exists.",
+)
+def main(model_name: str, restart: bool, target_file: str, force: bool):
     """Main function to process markdown files with command-line arguments."""
     if restart:
         logger.info("Restarting processing and clearing checkpoint file.")
@@ -430,7 +453,7 @@ def main(model_name: str, restart: bool, target_file: str):
 
     if target_file:
         logger.info(
-            f"Processing single file: {target_file} with model: {model_name}"
+            f"Processing single file: {target_file} with model: {model_name} (force={force})"
         )
 
         # Get list of already processed files to check against
@@ -441,6 +464,13 @@ def main(model_name: str, restart: bool, target_file: str):
             logger.info(
                 f"Found {len(processed_files)} already processed files."
             )
+        process_single_markdown_file(
+            INPUT_FOLDER,
+            OUTPUT_FOLDER,
+            target_file,
+            model_name,
+            force=force,
+        )
     else:
         logger.info(f"Starting processing with model: {model_name}")
         process_all_markdown_files(INPUT_FOLDER, OUTPUT_FOLDER, model_name)
