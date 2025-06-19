@@ -61,18 +61,19 @@ def extract_code_samples(soup):
 
     samples = []
     for container in code_section.find_all("li", class_="sample-code-main-container"):
-        title_tag = container.find("a")
-        time_title = title_tag.get_text(strip=True) if title_tag else "Untitled"
-
-        timestamp = time_title.split(" - ")[0] if " - " in time_title else ""
-        title = time_title.split(" - ")[1] if " - " in time_title else time_title
-
+        info_tag = container.find("p")
+        timestamp = ""
+        title = "Untitled"
+        if info_tag:
+            text = info_tag.get_text(" ", strip=True)
+            match = re.match(r"^(\d{1,2}:\d{2}) - (.+)", text)
+            if match:
+                timestamp = match.group(1)
+                title = match.group(2)
         code = container.find("pre", class_="code-source")
         code_text = code.get_text() if code else ""
-
         if code_text:
             samples.append({"timestamp": timestamp, "title": title, "code": code_text})
-
     return samples
 
 
