@@ -22,8 +22,8 @@ class LLMClientInterface(abc.ABC):
     """Abstract interface for LLM backends."""
 
     @abc.abstractmethod
-    def predict(self, prompt: str) -> str:
-        """Send prompt to model and return its response."""
+    def predict(self, prompt: str) -> tuple[str, float]:
+        """Send prompt to model and return its response and tokens/sec."""
         pass
 
 
@@ -48,13 +48,16 @@ class MlxLmClient(LLMClientInterface):
         self.model, self.tokenizer = load(model_id)
         self.prompt_cache = make_prompt_cache(self.model)
 
-    def predict(self, prompt: str) -> str:
+    def predict(self, prompt: str) -> tuple[str, float]:
+        import time
+
         from mlx_lm import generate
 
         messages = [{"role": "user", "content": prompt}]
         formatted_prompt = self.tokenizer.apply_chat_template(
             messages, add_generation_prompt=True
         )
+        start_time = time.time()
         response = generate(
             model=self.model,
             tokenizer=self.tokenizer,
@@ -62,7 +65,7 @@ class MlxLmClient(LLMClientInterface):
             verbose=True,
             prompt_cache=self.prompt_cache,
         )
-        return response if isinstance(response, str) else str(response)
+        return str(response)
 
 
 # Placeholder for future implementations
