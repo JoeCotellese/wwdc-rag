@@ -51,6 +51,44 @@ def chunk_and_summarize(body_text, model, tokenizer, max_tokens, overlap, thinki
     """
     Use MLXLM to split into chunks and summarize each.
     """
+    # If the entire document fits in the model context window, skip chunking
+    max_body_tokens = max_tokens - 500
+    token_count = len(tokenizer.encode(body_text))
+    if token_count <= max_body_tokens:
+        logger.info(
+            f"Entire document fits in context ({token_count} tokens); summarizing whole doc."
+        )
+        instruction = (
+            'Please output a JSON object with keys "title" (a concise 3-6 word headline) '
+            'and "summary" (a 1-2 sentence summary) for the following document.'
+        )
+        conversation = [
+            {"role": "system", "content": "You extract titles and summaries in JSON."},
+            {"role": "user", "content": f"{instruction}\n\nDocument:\n{body_text}"},
+        ]
+        if not thinking:
+            conversation.append({"role": "user", "content": "/no_think"})
+        prompt = tokenizer.apply_chat_template(
+            conversation=conversation, add_generation_prompt=True
+        )
+        response = generate(
+            model=model,
+            tokenizer=tokenizer,
+            prompt=prompt,
+            max_tokens=512,
+            verbose=False,
+        )
+        clean = response.replace("<think>", "").replace("</think>", "").strip()
+        try:
+            parsed = json.loads(clean)
+            title = parsed.get("title", "").strip()
+            summary = parsed.get("summary", "").strip()
+        except json.JSONDecodeError:
+            parts = clean.split("\n", 1)
+            title = parts[0].strip() if parts else ""
+            summary = parts[1].strip() if len(parts) > 1 else ""
+        return [{"title": title, "summary": summary, "content": body_text}]
+
     # split out code fence blocks as discrete chunks
     # regex to capture ```...``` blocks including their fences
     code_split_pattern = re.compile(r"(```[\s\S]+?```)")
@@ -74,6 +112,8 @@ def chunk_and_summarize(body_text, model, tokenizer, max_tokens, overlap, thinki
 
     results = []
     for chunk in chunks:
+        token_count = len(tokenizer.encode(chunk))
+        logger.info(f"Chunk token count: {token_count}")
         # build a prompt that asks for JSON output
         instruction = (
             'Please output a JSON object with keys "title" (a concise 3-6 word headline) '
@@ -115,13 +155,17 @@ def chunk_and_summarize(body_text, model, tokenizer, max_tokens, overlap, thinki
 
 @click.command()
 @click.option(
-    "--path",
-    "-p",
-    required=True,
-    type=click.Path(exists=True),
-    help="Directory path containing the input file",
+    "--file",
+    "-f",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to a single file to process",
 )
-@click.option("--filename", "-f", required=True, help="Name of the file to process")
+@click.option(
+    "--dir",
+    "-d",
+    type=click.Path(exists=True, file_okay=False),
+    help="Path to a directory of files to process",
+)
 @click.option(
     "--model", "-m", default="mlx-community/Qwen3-8B-4bit", help="MLX model identifier"
 )
@@ -135,57 +179,77 @@ def chunk_and_summarize(body_text, model, tokenizer, max_tokens, overlap, thinki
     default=False,
     help="Enable thinking mode (default: False)",
 )
-def prep_rag(path, filename, model, max_tokens, overlap, thinking):
+@click.option(
+    "--outdir",
+    default="./rag-chunks",
+    type=click.Path(file_okay=False),
+    help="Directory to write output JSON files",
+)
+def prep_rag(file, dir, model, max_tokens, overlap, thinking, outdir):
     """
     Read a document, extract metadata, chunk, summarize, and output JSON for RAG.
     """
     start_time = time.time()
-    logger.info(f"Starting RAG prep for file: {filename} in path: {path}")
+    if file:
+        logger.info(f"Starting RAG prep for file: {file}")
+        input_files = [file]
+    elif dir:
+        logger.info(f"Starting RAG prep for directory: {dir}")
+        input_files = [
+            os.path.join(dir, fname)
+            for fname in os.listdir(dir)
+            if fname.lower().endswith(".txt")
+        ]
+    else:
+        click.echo("Error: You must provide either --file or --dir.", err=True)
+        raise click.Abort()
 
     # Load the model and tokenizer
     model_obj, tokenizer = load(path_or_hf_repo=model)
 
-    full_path = os.path.join(path, filename)
-    with open(full_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+    os.makedirs(outdir, exist_ok=True)
+    for full_path in input_files:
+        with open(full_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
 
-    # extract metadata from top of file
-    meta = extract_metadata(lines[:20])
-    if not meta.get("year") or not meta.get("title") or not meta.get("url"):
-        click.echo(
-            "Error: Could not find YEAR, TITLE, or URL in the first 20 lines.", err=True
+        # extract metadata from top of file
+        meta = extract_metadata(lines[:20])
+        if not meta.get("year") or not meta.get("title") or not meta.get("url"):
+            click.echo(
+                "Error: Could not find YEAR, TITLE, or URL in the first 20 lines.",
+                err=True,
+            )
+            raise click.Abort()
+
+        # clean up entire content
+        body_text = clean_content(lines)
+
+        # chunk and summarize
+        logger.info(f"Chunking and summarizing with {model}...")
+        chunks = chunk_and_summarize(
+            body_text, model_obj, tokenizer, max_tokens, overlap, thinking
         )
-        raise click.Abort()
 
-    # clean up entire content
-    body_text = clean_content(lines)
+        # assemble result
+        result = {
+            "year": meta["year"],
+            "title": meta["title"],
+            "url": meta["url"],
+            "model": model,
+            "chunks": chunks,
+        }
 
-    # chunk and summarize
-    logger.info(f"Chunking and summarizing with {model}...")
-    chunks = chunk_and_summarize(
-        body_text, model_obj, tokenizer, max_tokens, overlap, thinking
-    )
+        # create output filename
+        base = f"{meta['year']}_{slugify(meta['title'])}.json"
+        out_path = os.path.join(outdir, base)
+        with open(out_path, "w", encoding="utf-8") as out:
+            json.dump(result, out, indent=2, ensure_ascii=False)
 
-    # assemble result
-    result = {
-        "year": meta["year"],
-        "title": meta["title"],
-        "url": meta["url"],
-        "model": model,
-        "chunks": chunks,
-    }
-
-    # create output filename
-    base = f"{meta['year']}_{slugify(meta['title'])}.json"
-    out_path = os.path.join(path, base)
-    with open(out_path, "w", encoding="utf-8") as out:
-        json.dump(result, out, indent=2, ensure_ascii=False)
+        logger.info(f"Wrote: {out_path}")
 
     elapsed = time.time() - start_time
     mins, secs = divmod(int(elapsed), 60)
     logger.info(f"Completed RAG prep in {mins:02d}:{secs:02d}")
-
-    logger.info(f"Output written to {out_path}")
 
 
 if __name__ == "__main__":

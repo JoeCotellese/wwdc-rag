@@ -1,20 +1,86 @@
+import json
+import logging
 import os
 import pathlib
-import json
-from typing import List
-import requests
 import re
-import logging
+from typing import List, Protocol
+
 import click
-from transformers import AutoTokenizer
+import requests
 
 tokenizer = None
+
+
+class LLMInterface(Protocol):
+    def chat(self, messages: List[dict], options: dict = None) -> str: ...
+
+
+class LMStudio:
+    def __init__(self, model_name: str = "qwen3:8b"):
+        self.model_name = model_name
+        self.api_url = "http://localhost:11234/v1/chat/completions"
+
+    def chat(self, messages: List[dict], options: dict = None) -> str:
+        if options is None:
+            options = {
+                "num_ctx": 40960,
+                "num_predict": 2048,
+                "temperature": 0.3,
+                "top_p": 0.8,
+                "top_k": 20,
+            }
+        data = {
+            "model": self.model_name,
+            "messages": messages,
+            "options": options,
+        }
+        try:
+            response = requests.post(self.api_url, json=data)
+            response.raise_for_status()
+            result_json = response.json()
+            return result_json["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"LMStudio.chat failed: {e}")
+            raise
+
+
+# === MLXLM class for LLMInterface compatibility ===
+class MLXLM:
+    def __init__(self, model_path: str = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"):
+        from mlx_lm import load
+
+        self.model, self.tokenizer = load(model_path)
+        self.prompt_cache = None
+
+    def chat(self, messages: List[dict], options: dict = None) -> str:
+        from mlx_lm import generate
+        from mlx_lm.models.cache import make_prompt_cache
+
+        if self.prompt_cache is None:
+            self.prompt_cache = make_prompt_cache(self.model)
+
+        prompt = self.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True
+        )
+
+        response = generate(
+            self.model,
+            self.tokenizer,
+            prompt=prompt,
+            verbose=False,
+            prompt_cache=self.prompt_cache,
+        )
+        return response
+
+
 def get_tokenizer(model_name):
     global tokenizer
     if tokenizer is None:
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8b")
     return tokenizer
+
 
 # Configure logging
 logging.basicConfig(
@@ -30,19 +96,89 @@ OUTPUT_FOLDER = "./rag-chunks"
 CHECKPOINT_FILE = "checkpoint.json"
 
 
+def extract_topics(text: str, model_name: str = "qwen3:8b") -> List[dict]:
+    """
+    Extracts a list of topics and their descriptions from the input text using
+    the LM Studio API.
+    """
+    logger.info("Extracting topics from transcript.")
+    prompt = f"""
+<context>
+/no_think
+You are a technical summarizer skilled at identifying the key themes in 
+developer-focused transcripts.
+</context>
+<task>
+List the main topics covered in the following transcript. For each topic, 
+provide:
+- A short title (2–5 words)
+- A one-sentence description summarizing what is discussed
+
+Return a JSON array in the following format:
+[
+  {{
+    "topic": "Title of Topic",
+    "description": "One sentence summary of the topic"
+  }},
+  ...
+]
+</task>
+<input>{text}</input>
+"""
+    try:
+        llm = MLXLM(model_name)
+        completion_text = llm.chat([{"role": "user", "content": prompt}])
+        topics = extract_json_from_text(completion_text)
+        logger.info(f"Extracted {len(topics)} topics.")
+        logger.debug("Extracted topics:\n" + json.dumps(topics, indent=2))
+        return topics
+    except Exception as e:
+        logger.error(f"Failed to extract topics: {e}")
+        logger.warning(
+            f"Raw LLM response:\n{completion_text[:1000] if 'completion_text' in locals() else 'N/A'}"
+        )
+        return []
+
+
 def extract_json_from_text(text: str):
     """
     Extract the first JSON array found in the given text using regex.
-    Returns the parsed JSON object or raises json.JSONDecodeError if none found.
+    Strips markdown fences and whitespace before parsing.
     """
     logger.debug("Extracting JSON from text.")
-    # Regex to find JSON array (starting with [ and ending with ])
-    json_array_pattern = re.compile(r"\[\s*{.*}\s*\]", re.DOTALL)
+
+    # Strip ```json ... ``` fencing if present
+    text = text.strip()
+    if text.startswith("```json"):
+        text = text[len("```json") :].strip()
+    if text.endswith("```"):
+        text = text[: -len("```")].strip()
+
+    # Now extract the JSON array
+    json_array_pattern = re.compile(
+        r"$begin:math:display$\\s*{.*}\\s*$end:math:display$", re.DOTALL
+    )
     match = json_array_pattern.search(text)
     if not match:
         raise json.JSONDecodeError("No JSON array found", text, 0)
+
     json_text = match.group(0)
     return json.loads(json_text)
+
+
+# def extract_json_from_text(text: str):
+#     """
+#     Extract the first JSON array found in the given text using regex.
+#     Returns the parsed JSON object or raises json.JSONDecodeError if none found.
+#     """
+#     logger.debug("Extracting JSON from text.")
+#     # Regex to find JSON array (starting with [ and ending with ])
+#     json_array_pattern = re.compile(r"\[\s*{.*}\s*\]", re.DOTALL)
+#     match = json_array_pattern.search(text)
+#     if not match:
+#         raise json.JSONDecodeError("No JSON array found", text, 0)
+#     json_text = match.group(0)
+#     return json.loads(json_text)
 
 
 def lmstudio_chunker_via_rest(
@@ -52,9 +188,7 @@ def lmstudio_chunker_via_rest(
     Use the LM Studio REST API to perform chunking of the markdown text.
     """
     logger.info(f"Using model: {model_name}")
-    url = "http://localhost:11434/v1/chat/completions"
-    prompt = (
-        """
+    prompt = """
 <context>
         You are an expert technical editor.
         /no_think
@@ -64,11 +198,14 @@ Your task is to take the provided text (a transcript, article, or technical
 document) and break it into coherent, self-contained chunks. These chunk are 
 used for RAG.
 
+If you can not provide a chunk. Do not synthesize new information.
+
 Each chunk should:
 - Focus on a single topic or subtopic
 - Be no more than ~300–500 words
 - Include a short title and a brief 1–2 sentence summary
-- Contain enough context to make sense on its own
+- Contain enough context to make sense on its own. Do not summarize the content.
+  it should be the raw transcript.
 
 Output format:
 [
@@ -81,7 +218,6 @@ Output format:
 ]
 </task>
 <input>{markdown_text}</input>"""
-    )
 
     data = {
         "model": model_name,
@@ -95,19 +231,14 @@ Output format:
         },
     }
     try:
-        response = requests.post(url, json=data)
-        response.raise_for_status()
-        logger.info("Received response from LM Studio API.")
-        result_json = response.json()
-        # The API response format may vary; adjust accordingly
-        # Now expecting the content in result_json['choices'][0]['message']['content']
-        completion_text = result_json["choices"][0]["message"]["content"]
+        llm = LMStudio(model_name)
+        completion_text = llm.chat(
+            [{"role": "user", "content": prompt}], options=data["options"]
+        )
         chunks = extract_json_from_text(completion_text)
     except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
-        logger.error(
-            f"Error during LM Studio REST API call or JSON parsing: {e}")
-        logger.warning(
-            f"Raw LLM output (last 2000 chars):\n{completion_text[-2000:]}")
+        logger.error(f"Error during LM Studio REST API call or JSON parsing: {e}")
+        logger.warning(f"Raw LLM output (last 2000 chars):\n{completion_text[-2000:]}")
         return []
     return chunks
 
@@ -176,16 +307,51 @@ def split_text_by_tokens(text, max_tokens=2048, overlap=200, model_name="qwen3:8
     return chunks
 
 
-
-def split_by_tokens(content: str, max_tokens: int = 20000, model_name: str = "qwen3:8b") -> List[str]:
+def split_by_tokens(
+    content: str, max_tokens: int = 20000, model_name: str = "qwen3:8b"
+) -> List[str]:
     """
     Split content into chunks based on token count.
     """
-    return split_text_by_tokens(content, max_tokens=max_tokens, overlap=200, model_name=model_name)
+    return split_text_by_tokens(
+        content, max_tokens=max_tokens, overlap=200, model_name=model_name
+    )
+
+
+def chunker(markdown_text: str, llm: LLMInterface) -> List[str]:
+    """
+    Chunk the markdown text using the provided LLMInterface.
+    """
+    logger.info(f"Using chunker with LLM: {llm.__class__.__name__}")
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert technical editor. Your task is to take the provided text "
+                "(a transcript, article, or technical document) and break it into coherent, "
+                "self-contained chunks. These chunks are used for Retrieval-Augmented Generation (RAG). "
+                "Each chunk should focus on a single topic or subtopic, be no more than ~300–500 words, "
+                "include a short title and a brief 1–2 sentence summary, and contain enough context to "
+                "make sense on its own. Do not summarize the content—include the raw content itself. "
+                "If you cannot provide a chunk, do not fabricate or synthesize content."
+            ),
+        },
+        {"role": "user", "content": markdown_text},
+    ]
+    try:
+        completion_text = llm.chat(messages)
+        chunks = extract_json_from_text(completion_text)
+    except Exception as e:
+        logger.error(f"Error during chunker call or JSON parsing: {e}")
+        logger.warning(
+            f"Raw LLM output (last 2000 chars):\n{completion_text[-2000:] if 'completion_text' in locals() else ''}"
+        )
+        return []
+    return chunks
 
 
 def process_with_retry(
-    content: str, model_name: str, max_retries: int = 3
+    content: str, llm: LLMInterface, model_name: str, max_retries: int = 3
 ) -> List[dict]:
     """
     Process content with progressive splitting on failure.
@@ -204,7 +370,7 @@ def process_with_retry(
         for chunk in current_chunks:
             try:
                 # Try to process the chunk
-                chunk_result = lmstudio_chunker_via_rest(chunk, model_name)
+                chunk_result = chunker(chunk, llm)
                 if chunk_result:  # Only add if we got valid results
                     results.extend(chunk_result)
                     logger.info(f"Chunk result count: {len(chunk_result)}")
@@ -216,7 +382,11 @@ def process_with_retry(
                     )
                     # Split into smaller chunks based on token estimate
                     new_chunk_size = 20000 - (retry * 5000)  # Reduce size
-                    new_chunks.extend(split_by_tokens(chunk, max_tokens=new_chunk_size, model_name=model_name))
+                    new_chunks.extend(
+                        split_by_tokens(
+                            chunk, max_tokens=new_chunk_size, model_name=model_name
+                        )
+                    )
                     success = False
             except Exception as e:
                 # If processing fails, split the chunk further
@@ -226,7 +396,11 @@ def process_with_retry(
                 )
                 # Split into smaller chunks based on token estimate
                 new_chunk_size = 20000 - (retry * 5000)  # Reduce size
-                new_chunks.extend(split_by_tokens(chunk, max_tokens=new_chunk_size, model_name=model_name))
+                new_chunks.extend(
+                    split_by_tokens(
+                        chunk, max_tokens=new_chunk_size, model_name=model_name
+                    )
+                )
                 success = False
 
         if success or not new_chunks:
@@ -257,10 +431,25 @@ def process_markdown_file(
     file_path: str, output_folder: str, model_name: str, processed_files: list
 ):
     """Helper function to process a single markdown file."""
+    import time
+
+    start_time = time.time()
     filename = os.path.basename(file_path)
     logger.info(f"Processing file: {filename}")
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
+
+    def extract_code_blocks_from_markdown(content: str) -> List[dict]:
+        pattern = re.compile(
+            r"--- Code Sample \d+ ---\s+\*\*Time\*\*: (.*?)\s+\*\*Title\*\*: (.*?)\n\n```swift\n(.*?)```",
+            re.DOTALL,
+        )
+        matches = pattern.findall(content)
+        return [
+            {"timestamp": ts.strip(), "title": title.strip(), "code": code.strip()}
+            for ts, title, code in matches
+        ]
+
     logger.info(f"Loaded content length: {len(content)} characters")
 
     # Extract YEAR, TITLE, URL from header using regex
@@ -278,9 +467,18 @@ def process_markdown_file(
 
     # Process content with progressive splitting
     logger.info(f"Processing content for file: {filename}")
+    topics = extract_topics(content, model_name=model_name)
+    if topics:
+        logger.info("Extracted Topics:")
+        for i, topic in enumerate(topics, 1):
+            logger.info(f"{i}. {topic['topic']}: {topic['description']}")
+    else:
+        logger.warning("No topics extracted.")
 
+    # Initialize LLM
+    llm = MLXLM("mlx-community/Qwen3-8B-4bit")
     # Use our new token-based approach with retries
-    all_chunks = process_with_retry(content, model_name, max_retries=3)
+    all_chunks = process_with_retry(content, llm, model_name, max_retries=3)
 
     # If processing completely failed, log an error
     if not all_chunks:
@@ -296,6 +494,22 @@ def process_markdown_file(
     year_match = re.search(r"wwdc(\d{4})", year)
     if year_match:
         numeric_year = year_match.group(1)
+
+    # Add parsed code blocks from markdown to all_chunks
+    code_blocks = extract_code_blocks_from_markdown(content)
+    for block in code_blocks:
+        all_chunks.append(
+            {
+                "title": f"Code: {block['title']}",
+                "summary": f"Code sample from the session – {block['title']}",
+                "content": block["code"],
+                "type": "code",
+                "source": source,
+                "year": numeric_year,
+                "url": url,
+            }
+        )
+    logger.info(f"Appended {len(code_blocks)} code chunks from markdown.")
 
     # Add metadata to each chunk
     for chunk in all_chunks:
@@ -317,6 +531,10 @@ def process_markdown_file(
     chunks_json_path = os.path.join(talk_output_dir, f"{safe_title(filename)}.json")
     with open(chunks_json_path, "w", encoding="utf-8") as json_file:
         json.dump(output_dict, json_file, indent=2)
+    elapsed_time = time.time() - start_time
+    minutes = int(elapsed_time // 60)
+    seconds = int(elapsed_time % 60)
+    logger.info(f"Processing time for {filename}: {minutes}:{seconds:02d}")
     logger.info(f"Saved chunks to: {chunks_json_path}")
 
     # Mark the file as processed and save progress
@@ -415,7 +633,7 @@ def process_file(file_path: str, model_name: str, force: bool = False):
 @click.command()
 @click.option(
     "--model_name",
-    default="qwen3:8b",
+    default="qwen3:14b",
     help="Name of the model to use for processing.",
 )
 @click.option(

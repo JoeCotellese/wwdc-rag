@@ -11,4 +11,5 @@ dependencies = [
     "requests>=2.32.4",
     "sentencepiece>=0.2.0",
     "transformers>=4.52.4",
+    "mlx-lm (>=0.25.2,<0.26.0)",
 ]
