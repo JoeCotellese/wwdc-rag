@@ -40,11 +40,27 @@ A tool that uses local language models via LM Studio to:
 - Save the resulting chunks as JSON files with preserved metadata
 - Handle large documents through progressive splitting
 
+### 3. Deterministic Chunker (`brute-rag.py`)
+
+A tool for deterministic chunking of transcripts without relying on language models. It:
+- Extracts metadata (year, title, URL) from the transcript
+- Splits the content into chunks based on predefined rules
+- Handles code samples and narrative content separately
+- Saves the resulting chunks as JSON files
+
+### 4. CLI Chat Client (`chat.py`)
+
+A simple CLI chat client supporting swappable LLM backends. It:
+- Defaults to MLX-LM (via the mlx-lm Python SDK)
+- Allows interaction with the model through a conversational interface
+- Supports future backend implementations (e.g., Ollama, LM Studio)
+- Provides a pluggable interface for easy customization
+
 ## Setup and Usage
 
 ### Prerequisites
 
-- Python 3.7+
+- Python 3.13+
 - LM Studio (with a language model loaded and the API server running)
 - Required Python packages: `pip install beautifulsoup4 requests click`
 
