@@ -118,7 +118,7 @@ def prep_rag(file, dir, model, max_tokens, overlap, thinking, outdir):
         input_files = [
             os.path.join(dir, fname)
             for fname in os.listdir(dir)
-            if fname.lower().endswith(".txt")
+            if fname.lower().endswith(".md")
         ]
     else:
         click.echo("Error: You must provide either --file or --dir.", err=True)
