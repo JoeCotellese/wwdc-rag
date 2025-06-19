@@ -14,4 +14,6 @@ dependencies = [
     "mlx-lm (>=0.25.2,<0.26.0)",
     "prompt-toolkit>=3.0.51",
     "rich>=14.0.0",
+    "pgvector>=0.4.1",
+    "sentence-transformers>=4.1.0",
 ]
