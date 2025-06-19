@@ -1,11 +1,12 @@
+import logging
 import os
 import re
+import time
+from urllib.parse import urljoin
+
+import click
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
-import logging
-import time
-import click
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +54,28 @@ def extract_transcript(url):
     }
 
 
+def extract_code_samples(soup):
+    code_section = soup.find("li", class_="supplement sample-code")
+    if not code_section:
+        return []
+
+    samples = []
+    for container in code_section.find_all("li", class_="sample-code-main-container"):
+        title_tag = container.find("a")
+        time_title = title_tag.get_text(strip=True) if title_tag else "Untitled"
+
+        timestamp = time_title.split(" - ")[0] if " - " in time_title else ""
+        title = time_title.split(" - ")[1] if " - " in time_title else time_title
+
+        code = container.find("pre", class_="code-source")
+        code_text = code.get_text() if code else ""
+
+        if code_text:
+            samples.append({"timestamp": timestamp, "title": title, "code": code_text})
+
+    return samples
+
+
 def get_video_links(base_url):
     logger.info(f"Fetching video links from base URL: {base_url}")
     response = requests.get(base_url)
@@ -97,28 +120,49 @@ def save_transcript(transcript_object):
         f"{transcript_object['transcript']}\n"
     )
 
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(content)
-    logger.info(f"Transcript saved to {filepath}")
+    if "code_samples" in transcript_object:
+        content += "\n\nCODE SAMPLES:\n"
+        for idx, sample in enumerate(transcript_object["code_samples"], 1):
+            content += (
+                f"\n--- Code Sample {idx} ---\n"
+                f"**Time**: {sample['timestamp']}\n"
+                f"**Title**: {sample['title']}\n\n"
+                f"```swift\n{sample['code']}\n```\n"
+            )
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(content)
+        logger.info(f"Transcript saved to {filepath}")
 
 
 @click.command()
-@click.option('--base_url', required=True, help='Base URL to fetch video links.')
-def main(base_url):
-    """Main function to extract transcripts from a base URL."""
-    logger.info(f"Starting transcript extraction process for base URL: {base_url}")
-    links = get_video_links(base_url)
-
-    for link in links:
-        transcript_object = extract_transcript(link)
+@click.option("--base_url", required=False, help="Base URL to fetch video links.")
+@click.option("--url", required=False, help="Single video page URL to extract.")
+def main(base_url, url):
+    """Main function to extract transcripts from a base URL or a single video URL."""
+    if url and base_url:
+        logger.error("Please specify only one of --url or --base_url.")
+        return
+    elif url:
+        transcript_object = extract_transcript(url)
         if transcript_object:
-            logger.info(
-                f"Transcript extraction completed successfully: {transcript_object['talk_title']}"
-            )
+            soup = BeautifulSoup(requests.get(url).text, "html.parser")
+            transcript_object["code_samples"] = extract_code_samples(soup)
             save_transcript(transcript_object)
-        else:
-            logger.warning("Transcript extraction failed for one or more links")
-        time.sleep(1)  # Add a 1-second delay between requests
+        return
+    elif base_url:
+        logger.info(f"Starting transcript extraction process for base URL: {base_url}")
+        links = get_video_links(base_url)
+        for link in links:
+            transcript_object = extract_transcript(link)
+            if transcript_object:
+                soup = BeautifulSoup(requests.get(link).text, "html.parser")
+                transcript_object["code_samples"] = extract_code_samples(soup)
+                save_transcript(transcript_object)
+            else:
+                logger.warning("Transcript extraction failed for one or more links")
+            time.sleep(1)
+    else:
+        logger.error("Please specify either --url or --base_url.")
 
 
 if __name__ == "__main__":
