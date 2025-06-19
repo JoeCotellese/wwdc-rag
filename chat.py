@@ -10,20 +10,23 @@ implementing the LLMClientInterface.
 import abc
 import logging
 import os
+import re
 import sys
 import time
 
 import psycopg
 from mlx_lm import generate
+from mlx_lm.sample_utils import make_sampler
 from pgvector.psycopg import Vector, register_vector
 from prompt_toolkit import prompt
 from rich.console import Console
+from rich.markdown import Markdown
 from sentence_transformers import SentenceTransformer
 
 logging.basicConfig(level=logging.INFO, format="INFO: %(message)s")
 logger = logging.getLogger(__name__)
 
-env_model_id = os.getenv("MODEL_ID", "mlx-community/Qwen3-4B-4bit")
+env_model_id = os.getenv("MODEL_ID", "mlx-community/Qwen3-8B-4bit")
 env_context = int(os.getenv("CONTEXT_LENGTH", "32768"))
 
 
@@ -139,6 +142,12 @@ class MlxLmClient(LLMClientInterface):
         logger.info(f"Input tokens: {len(formatted_prompt)}")
         logger.info("Generating response")
         start_time = time.time()
+        sampler = make_sampler(
+            0.6,
+            0.95,
+            0,
+            top_k=20,
+        )
         response = generate(
             model=self.model,
             tokenizer=self.tokenizer,
@@ -146,11 +155,10 @@ class MlxLmClient(LLMClientInterface):
             verbose=False,
             prompt_cache=self.prompt_cache,
             max_tokens=2048,
+            sampler=sampler,
         )
         response_str = str(response)
         if not show_think:
-            import re
-
             response_str = re.sub(
                 r"<think>.*?</think>", "", response_str, flags=re.DOTALL
             )
@@ -179,8 +187,9 @@ def chat_loop(client: LLMClientInterface, show_think: bool = False):
         start_time = time.time()
         logger.info("Querying database")
         response = client.predict(prompt_text, show_think=show_think)
-        logger.info(f"Response: {response}")
-        console.print(f"[bold magenta]Model:[/] {response}\n")
+        # logger.info(f"Response: {response}")
+        console.rule("[bold green]Model Response")
+        console.print(Markdown(response.strip()))
         elapsed = time.time() - start_time
         console.print(
             f"[grey62]⏱️ Elapsed time: {elapsed:.2f} seconds[/]", style="grey62"
