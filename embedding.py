@@ -23,7 +23,10 @@ CREATE TABLE IF NOT EXISTS {table} (
     chunk_index INTEGER,
     chunk_title TEXT,
     chunk_summary TEXT,
+    chunk_year TEXT,
     chunk_content TEXT,
+    wwdc TEXT,
+    chunk_number INTEGER,
     embedding VECTOR(384)
 );
 """
@@ -75,8 +78,10 @@ def embed_and_load(dir, db_url, reset: bool, table, model):
         register_vector(conn)
         with conn.cursor() as cur:
             if reset:
-                logger.info(f"Clearning {table}")
-                SQL("DROP TABLE IF EXISTS {table}").format(table=Identifier(table))
+                logger.info(f"Clearing {table}")
+                cur.execute(
+                    SQL("DROP TABLE IF EXISTS {table}").format(table=Identifier(table))
+                )
             # Ensure table exists
             cur.execute(SQL(TABLE_SCHEMA).format(table=Identifier(table)))
             conn.commit()
@@ -102,6 +107,8 @@ def embed_and_load(dir, db_url, reset: bool, table, model):
                     chunk_title = chunk.get("title")
                     summary = chunk.get("summary")
                     content = chunk.get("content", "")
+                    wwdc = chunk.get("wwdc")
+                    chunk_number = chunk.get("chunk_number")
 
                     # Compute embedding (normalized)
                     embedding = embedder.encode(
@@ -115,8 +122,9 @@ def embed_and_load(dir, db_url, reset: bool, table, model):
                         SQL(
                             "INSERT INTO {table} "
                             "(doc_year, doc_title, doc_url, chunk_index, "
-                            "chunk_title, chunk_summary, chunk_content, embedding) "
-                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                            "chunk_title, chunk_summary, chunk_year, chunk_content, wwdc, "
+                            "chunk_number, embedding) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                         ).format(table=Identifier(table)),
                         (
                             year,
@@ -125,11 +133,14 @@ def embed_and_load(dir, db_url, reset: bool, table, model):
                             idx,
                             chunk_title,
                             summary,
+                            year,  # Add chunk_year here
                             content,
+                            wwdc,
+                            chunk_number,
                             embedding.tolist(),
                         ),
                     )
-        conn.commit()
+                conn.commit()
 
 
 if __name__ == "__main__":

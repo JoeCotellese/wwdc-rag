@@ -73,13 +73,18 @@ class MlxLmClient(LLMClientInterface):
         raw = self.embedder.encode(query, normalize_embeddings=True)
         vec = Vector(raw.tolist())  # wrap in pgvector.Vector
         with self.conn.cursor() as cur:
+            from psycopg import sql
+
             cur.execute(
-                f"""
-                SELECT chunk_content, chunk_title, chunk_summary, doc_title, doc_url, doc_year
-                FROM {self.table_name}
-                ORDER BY embedding <-> %s
-                LIMIT %s
-                """,
+                sql.SQL(
+                    """
+                    SELECT chunk_content, chunk_title, chunk_summary,
+                           doc_title, doc_url, chunk_year, wwdc
+                    FROM {table}
+                    ORDER BY embedding <-> %s
+                    LIMIT %s
+                    """
+                ).format(table=sql.Identifier(self.table_name)),
                 (vec, top_k),
             )
             rows = cur.fetchall()
@@ -91,7 +96,8 @@ class MlxLmClient(LLMClientInterface):
                     "summary": row[2],
                     "doc_title": row[3],
                     "doc_url": row[4],
-                    "doc_year": row[5],
+                    "chunk_year": row[5],
+                    "wwdc": row[6],
                 }
                 for row in rows
             ]
@@ -104,9 +110,13 @@ class MlxLmClient(LLMClientInterface):
         for chunk in retrieved_chunks:
             section_title = f"### {chunk['title']}\n" if chunk["title"] else ""
             summary_text = f"{chunk['summary']}\n\n" if chunk["summary"] else ""
-            context_parts.append(f"{section_title}{summary_text}{chunk['content']}")
+            year = f"{chunk['chunk_year']}\n\n" if chunk["chunk_year"] else ""
+            wwdc = f"{chunk['wwdc']}\n\n" if chunk["wwdc"] else exit
+            context_parts.append(
+                f"{section_title}{summary_text}{year}{wwdc}{chunk['content']}"
+            )
             citations.append(
-                f"- [{chunk['doc_title']} (WWDC {chunk['doc_year']})]({chunk['doc_url']})"
+                f"- [{chunk['doc_title']} (WWDC {chunk['chunk_year']})]({chunk['doc_url']})"
             )
 
         context = "\n\n".join(context_parts)
@@ -127,8 +137,8 @@ class MlxLmClient(LLMClientInterface):
             "“learn more.”\n"
             "- Do not fabricate information. If the information is not available in the context, say so.\n"
             "- You are friendly and professional but avoid unnecessary chit-chat.\n\n"
-            "Citation format:\n"
-            "> Learn more: [Session Title](https://developer.apple.com/videos/play/wwdcYYYY/###/)"
+            # "Citation format:\n"
+            # "> Learn more: [Session Title](https://developer.apple.com/videos/play/wwdcYYYY/###/)"
         )
 
         messages = [

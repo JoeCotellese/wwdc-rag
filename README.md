@@ -40,6 +40,8 @@ A tool that uses local language models via LM Studio to:
 - Save the resulting chunks as JSON files with preserved metadata
 - Handle large documents through progressive splitting
 
+_NOTE: This was an experiment in using an LLM to semantically create chunks. I wasn't loving the results_
+
 ### 3. Deterministic Chunker (`brute-rag.py`)
 
 A tool for deterministic chunking of transcripts without relying on language models. It:
@@ -56,13 +58,9 @@ A simple CLI chat client supporting swappable LLM backends. It:
 - Supports future backend implementations (e.g., Ollama, LM Studio)
 - Provides a pluggable interface for easy customization
 
-## Setup and Usage
+## Updated Workflow
 
-### Prerequisites
-
-- Python 3.13+
-- LM Studio (with a language model loaded and the API server running)
-- Required Python packages: `pip install beautifulsoup4 requests click`
+To run the tools in the correct order, follow these steps:
 
 ### Step 1: Extract Transcripts
 
@@ -75,15 +73,26 @@ This will download transcripts to the `./transcripts` directory.
 ### Step 2: Process Transcripts into RAG Chunks
 
 ```bash
-python assisted-rag.py --model_name "qwen/qwen3-14b"
+python brute-rag.py --dir ./transcripts --output ./rag-chunks
 ```
 
-Options:
-- `--model_name`: Specify which model to use (must be loaded in LM Studio)
-- `--restart`: Restart processing from the beginning
-- `--file`: Process a single transcript file
+This will deterministically chunk the transcripts and save them in the `./rag-chunks` directory.
 
-The processed chunks will be saved in the `./rag-chunks/{model_name}/` directory.
+### Step 3: Embed and Load Chunks into the Database
+
+```bash
+python embedding.py --dir ./rag-chunks --reset --table rag_chunks
+```
+
+This will compute embeddings for each chunk and insert them into the specified Postgres table.
+
+### Step 4: Interact with the Chat Client
+
+```bash
+python chat.py
+```
+
+This will start the CLI chat client, allowing you to interact with the language model.
 
 ## Better Ways to Do This?
 

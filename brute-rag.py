@@ -19,7 +19,9 @@ def extract_metadata(lines):
     meta = {}
     for line in lines:
         if line.startswith("YEAR:"):
-            meta["year"] = line.split(":", 1)[1].strip().lower()
+            year_string = line.split(":", 1)[1].strip().lower()
+            meta["year"] = re.sub(r"^wwdc", "", year_string)
+            meta["wwdc"] = year_string
         elif line.startswith("TITLE:"):
             meta["title"] = line.split(":", 1)[1].strip()
         elif line.startswith("URL:"):
@@ -79,7 +81,7 @@ def chunk_by_paragraphs(content, tokenizer=None, max_tokens=256):
     return chunks
 
 
-def deterministic_chunk(body_text, year: str, title: str, url: str):
+def deterministic_chunk(body_text, wwdc: str, year: str, title: str, url: str):
     code_pattern = re.compile(
         r"--- Code Sample \d+ ---[\s\S]+?```[\s\S]+?```", re.MULTILINE
     )
@@ -105,6 +107,7 @@ def deterministic_chunk(body_text, year: str, title: str, url: str):
         chunks.append(
             {
                 "title": title,
+                "wwdc": wwdc,
                 "year": year,
                 "url": url,
                 "chunk_number": i,
@@ -198,18 +201,23 @@ def prep_rag(file, dir, model, max_tokens, overlap, thinking, outdir):
 
         body_text = clean_content(lines)
         chunks = deterministic_chunk(
-            body_text, year=meta["year"], title=meta["title"], url=meta["url"]
+            body_text,
+            year=meta["year"],
+            wwdc=meta["wwdc"],
+            title=meta["title"],
+            url=meta["url"],
         )
 
         result = {
             "year": meta["year"],
+            "wwdc": meta["wwdc"],
             "title": meta["title"],
             "url": meta["url"],
             "model": model,
             "chunks": chunks,
         }
 
-        base = f"{meta['year']}_{slugify(meta['title'])}.json"
+        base = f"{meta['wwdc']}_{slugify(meta['title'])}.json"
         out_path = os.path.join(outdir, base)
         with open(out_path, "w", encoding="utf-8") as out:
             json.dump(result, out, indent=2, ensure_ascii=False)
