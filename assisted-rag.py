@@ -96,10 +96,10 @@ OUTPUT_FOLDER = "./rag-chunks"
 CHECKPOINT_FILE = "checkpoint.json"
 
 
-def extract_topics(text: str, model_name: str = "qwen3:8b") -> List[dict]:
+def extract_topics(text: str, llm: LLMInterface) -> List[dict]:
     """
     Extracts a list of topics and their descriptions from the input text using
-    the LM Studio API.
+    the provided LLMInterface.
     """
     logger.info("Extracting topics from transcript.")
     prompt = f"""
@@ -114,7 +114,7 @@ provide:
 - A short title (2–5 words)
 - A one-sentence description summarizing what is discussed
 
-Return a JSON array in the following format:
+Return only a JSON array in the following format:
 [
   {{
     "topic": "Title of Topic",
@@ -126,17 +126,11 @@ Return a JSON array in the following format:
 <input>{text}</input>
 """
     try:
-        llm = MLXLM(model_name)
-        completion_text = llm.chat([{"role": "user", "content": prompt}])
-        topics = extract_json_from_text(completion_text)
-        logger.info(f"Extracted {len(topics)} topics.")
-        logger.debug("Extracted topics:\n" + json.dumps(topics, indent=2))
+        response = llm.chat([{"role": "user", "content": prompt}])
+        topics = extract_json_from_text(response)
         return topics
     except Exception as e:
-        logger.error(f"Failed to extract topics: {e}")
-        logger.warning(
-            f"Raw LLM response:\n{completion_text[:1000] if 'completion_text' in locals() else 'N/A'}"
-        )
+        logger.error(f"Error extracting topics: {e}")
         return []
 
 
@@ -147,17 +141,16 @@ def extract_json_from_text(text: str):
     """
     logger.debug("Extracting JSON from text.")
 
+    # Strip <think>*</think> tags if present
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     # Strip ```json ... ``` fencing if present
-    text = text.strip()
     if text.startswith("```json"):
         text = text[len("```json") :].strip()
     if text.endswith("```"):
         text = text[: -len("```")].strip()
 
-    # Now extract the JSON array
-    json_array_pattern = re.compile(
-        r"$begin:math:display$\\s*{.*}\\s*$end:math:display$", re.DOTALL
-    )
+    # Now extract the JSON array (starting with [ and ending with ])
+    json_array_pattern = re.compile(r"\[\s*{.*?}\s*\]", re.DOTALL)
     match = json_array_pattern.search(text)
     if not match:
         raise json.JSONDecodeError("No JSON array found", text, 0)
@@ -465,9 +458,12 @@ def process_markdown_file(
     else:
         logger.warning(f"Metadata not found in file: {filename}")
 
+    # Initialize LLM
+    llm = LMStudio(model_name=model_name)
+
     # Process content with progressive splitting
     logger.info(f"Processing content for file: {filename}")
-    topics = extract_topics(content, model_name=model_name)
+    topics = extract_topics(content, llm=llm)
     if topics:
         logger.info("Extracted Topics:")
         for i, topic in enumerate(topics, 1):
@@ -475,71 +471,69 @@ def process_markdown_file(
     else:
         logger.warning("No topics extracted.")
 
-    # Initialize LLM
-    llm = MLXLM("mlx-community/Qwen3-8B-4bit")
-    # Use our new token-based approach with retries
-    all_chunks = process_with_retry(content, llm, model_name, max_retries=3)
+    # # Use our new token-based approach with retries
+    # all_chunks = process_with_retry(content, llm, model_name, max_retries=3)
 
-    # If processing completely failed, log an error
-    if not all_chunks:
-        logger.error(f"Failed to process file '{filename}' after multiple attempts")
-        all_chunks = []
+    # # If processing completely failed, log an error
+    # if not all_chunks:
+    #     logger.error(f"Failed to process file '{filename}' after multiple attempts")
+    #     all_chunks = []
 
-    logger.info(f"Generated {len(all_chunks)} chunks for file: {filename}")
+    # logger.info(f"Generated {len(all_chunks)} chunks for file: {filename}")
 
-    # Extract source as "wwdc" from the year field
-    source = "wwdc"
-    # Extract numeric year from the year field (e.g., "wwdc2023" -> "2023")
-    numeric_year = ""
-    year_match = re.search(r"wwdc(\d{4})", year)
-    if year_match:
-        numeric_year = year_match.group(1)
+    # # Extract source as "wwdc" from the year field
+    # source = "wwdc"
+    # # Extract numeric year from the year field (e.g., "wwdc2023" -> "2023")
+    # numeric_year = ""
+    # year_match = re.search(r"wwdc(\d{4})", year)
+    # if year_match:
+    #     numeric_year = year_match.group(1)
 
-    # Add parsed code blocks from markdown to all_chunks
-    code_blocks = extract_code_blocks_from_markdown(content)
-    for block in code_blocks:
-        all_chunks.append(
-            {
-                "title": f"Code: {block['title']}",
-                "summary": f"Code sample from the session – {block['title']}",
-                "content": block["code"],
-                "type": "code",
-                "source": source,
-                "year": numeric_year,
-                "url": url,
-            }
-        )
-    logger.info(f"Appended {len(code_blocks)} code chunks from markdown.")
+    # # Add parsed code blocks from markdown to all_chunks
+    # code_blocks = extract_code_blocks_from_markdown(content)
+    # for block in code_blocks:
+    #     all_chunks.append(
+    #         {
+    #             "title": f"Code: {block['title']}",
+    #             "summary": f"Code sample from the session – {block['title']}",
+    #             "content": block["code"],
+    #             "type": "code",
+    #             "source": source,
+    #             "year": numeric_year,
+    #             "url": url,
+    #         }
+    #     )
+    # logger.info(f"Appended {len(code_blocks)} code chunks from markdown.")
 
-    # Add metadata to each chunk
-    for chunk in all_chunks:
-        chunk["source"] = source
-        chunk["year"] = numeric_year
-        chunk["url"] = url
+    # # Add metadata to each chunk
+    # for chunk in all_chunks:
+    #     chunk["source"] = source
+    #     chunk["year"] = numeric_year
+    #     chunk["url"] = url
 
-    talk_output_dir = os.path.join(output_folder, model_name)
-    os.makedirs(talk_output_dir, exist_ok=True)
-    logger.info(f"Created output directory: {talk_output_dir}")
+    # talk_output_dir = os.path.join(output_folder, model_name)
+    # os.makedirs(talk_output_dir, exist_ok=True)
+    # logger.info(f"Created output directory: {talk_output_dir}")
 
-    output_dict = {
-        "year": year,
-        "title": title,
-        "url": url,
-        "model": model_name,  # Add dynamic model name to metadata
-        "chunks": all_chunks,
-    }
-    chunks_json_path = os.path.join(talk_output_dir, f"{safe_title(filename)}.json")
-    with open(chunks_json_path, "w", encoding="utf-8") as json_file:
-        json.dump(output_dict, json_file, indent=2)
-    elapsed_time = time.time() - start_time
-    minutes = int(elapsed_time // 60)
-    seconds = int(elapsed_time % 60)
-    logger.info(f"Processing time for {filename}: {minutes}:{seconds:02d}")
-    logger.info(f"Saved chunks to: {chunks_json_path}")
+    # output_dict = {
+    #     "year": year,
+    #     "title": title,
+    #     "url": url,
+    #     "model": model_name,  # Add dynamic model name to metadata
+    #     "chunks": all_chunks,
+    # }
+    # chunks_json_path = os.path.join(talk_output_dir, f"{safe_title(filename)}.json")
+    # with open(chunks_json_path, "w", encoding="utf-8") as json_file:
+    #     json.dump(output_dict, json_file, indent=2)
+    # elapsed_time = time.time() - start_time
+    # minutes = int(elapsed_time // 60)
+    # seconds = int(elapsed_time % 60)
+    # logger.info(f"Processing time for {filename}: {minutes}:{seconds:02d}")
+    # logger.info(f"Saved chunks to: {chunks_json_path}")
 
-    # Mark the file as processed and save progress
-    processed_files.append(filename)
-    save_progress(processed_files)
+    # # Mark the file as processed and save progress
+    # processed_files.append(filename)
+    # save_progress(processed_files)
 
 
 def process_all_markdown_files(
@@ -611,11 +605,7 @@ def process_single_markdown_file(
 
     processed_files = list(load_progress_filecheck(INPUT_FOLDER, OUTPUT_FOLDER))
 
-    # Use processed_files in the logic
-    if processed_files:
-        logger.info("Loaded processed files successfully.")
-        for file in processed_files:
-            logger.debug(f"Already processed: {file}")
+    logger.info(f"Found {len(processed_files)} already processed files.")
 
     process_file(file_path, model_name, force=force)
 
@@ -654,7 +644,19 @@ def process_file(file_path: str, model_name: str, force: bool = False):
     default=False,
     help="Force reprocessing of the file even if output already exists.",
 )
-def main(model_name: str, restart: bool, target_file: str, force: bool):
+@click.option(
+    "--topics-only",
+    is_flag=True,
+    default=False,
+    help="Parse the input file and print the topics to the console",
+)
+def main(
+    model_name: str,
+    restart: bool,
+    target_file: str,
+    force: bool,
+    topics_only: bool,
+):
     """Main function to process markdown files with command-line arguments."""
     if restart:
         logger.info("Restarting processing and clearing checkpoint file.")
