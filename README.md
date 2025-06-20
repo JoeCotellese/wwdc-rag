@@ -10,6 +10,8 @@ The workflow consists of two main steps:
 1. Extracting transcripts from WWDC videos
 2. Converting these transcripts into context-rich, semantically meaningful chunks using local language models
 
+This is meant to be a learning exercise in understand RAG pipelines. I've experiemented with RAG using tools like [OpenWebUI](https://www.openwebui.com) and [AnythingLLM](https://anythingllm.com) but those are general purpose and the process is opaque.
+
 ## Why This Matters
 
 When using local RAG applications like LM Studio or Open Web UI, you often don't have control over the metadata that accompanies your documents. This metadata provides crucial context that helps language models better understand and retrieve relevant information:
@@ -19,7 +21,9 @@ When using local RAG applications like LM Studio or Open Web UI, you often don't
 - **Topic coherence**: Maintaining semantic boundaries between different concepts
 - **Information hierarchy**: Preserving the relationships between main topics and subtopics
 
-By pre-processing the documents with a semantic chunking approach, we can ensure that each chunk contains not just the content itself but also the contextual metadata needed for accurate retrieval.
+By pre-processing the documents with by hand, we can ensure that each chunk contains not just the content itself but also the contextual metadata needed for accurate retrieval.
+
+I'd love to see some of these tools have a metadata section tied to each document collection.
 
 ## Components
 
@@ -100,8 +104,8 @@ This project is an exploration of RAG document preparation techniques, and I'm s
 
 Some areas for improvement might include:
 - More sophisticated chunking algorithms
-- Better token estimation
-- Integration with vector stores
+- Integration with other vector stores beside pgvector
+- Add a search engine between the intial chat request and the vector retrieval
 - Parallel processing for large document collections
 
 I welcome comments on the repository and pull requests with improvements!
