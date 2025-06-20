@@ -5,11 +5,14 @@ import re
 import time
 
 import click
+from sentence_transformers import SentenceTransformer
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 def extract_metadata(lines):
@@ -36,27 +39,77 @@ def slugify(text):
     return text.strip("_")
 
 
-def deterministic_chunk(body_text):
+def chunk_by_paragraphs(content, tokenizer=None, max_tokens=256):
+    if tokenizer is None:
+        raise ValueError("A tokenizer must be provided.")
+
+    paragraphs = content.strip().split("\n")
+    chunks = []
+
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+
+        token_count = len(tokenizer.encode(para, add_special_tokens=True))
+        if token_count < 12:
+            logger.info(f"skipping short chunk: {para}")
+            continue
+        logger.debug(f"processing {para[:10]} with {token_count} tokens")
+        if token_count <= max_tokens:
+            chunks.append(para)
+        else:
+            logger.info(f"Paragraph > {max_tokens}. Splitting by sentence")
+            # fallback: sentence-based splitting inside the paragraph
+            sentences = re.split(r"(?<=[.!?])\s+", para)
+            buffer = ""
+            for sentence in sentences:
+                candidate = f"{buffer} {sentence}".strip()
+                if (
+                    len(tokenizer.encode(candidate, add_special_tokens=True))
+                    > max_tokens
+                ):
+                    if buffer:
+                        chunks.append(buffer.strip())
+                    buffer = sentence
+                else:
+                    buffer = candidate
+            if buffer:
+                chunks.append(buffer.strip())
+    return chunks
+
+
+def deterministic_chunk(body_text, year: str, title: str, url: str):
     code_pattern = re.compile(
         r"--- Code Sample \d+ ---[\s\S]+?```[\s\S]+?```", re.MULTILINE
     )
     code_chunks = code_pattern.findall(body_text)
-    content = code_pattern.split(body_text)[0]
+
+    content_match = re.search(r"CONTENT:\s*(.*?)\s*CODE SAMPLES:", body_text, re.DOTALL)
+    content = content_match.group(1).strip() if content_match else ""
+    paragraph_chunks = chunk_by_paragraphs(content, tokenizer=model.tokenizer)
 
     chunks = []
 
-    if content.strip():
-        cleaned_content = re.sub(
-            r"^(YEAR:.*|TITLE:.*|URL:.*|CONTENT:.*|CODE SAMPLES:)",
-            "",
-            content,
-            flags=re.MULTILINE,
-        ).strip()
+    if body_text.strip():
         chunks.append(
             {
                 "title": "Main Content",
                 "summary": "Narrative content from the session.",
-                "content": cleaned_content,
+                "type": "transcript",
+                "content": body_text,
+            }
+        )
+
+    for i, paragraph in enumerate(paragraph_chunks, start=1):
+        chunks.append(
+            {
+                "title": title,
+                "year": year,
+                "url": url,
+                "chunk_number": i,
+                "type": "chunk",
+                "content": paragraph,
             }
         )
 
@@ -65,7 +118,12 @@ def deterministic_chunk(body_text):
         title = title_match.group(1).strip() if title_match else "Code Sample"
         summary = f"Code example: {title}."
         chunks.append(
-            {"title": title, "summary": summary, "content": code_block.strip()}
+            {
+                "title": title,
+                "summary": summary,
+                "type": "code",
+                "content": code_block.strip(),
+            }
         )
 
     return chunks
@@ -139,7 +197,9 @@ def prep_rag(file, dir, model, max_tokens, overlap, thinking, outdir):
             raise click.Abort()
 
         body_text = clean_content(lines)
-        chunks = deterministic_chunk(body_text)
+        chunks = deterministic_chunk(
+            body_text, year=meta["year"], title=meta["title"], url=meta["url"]
+        )
 
         result = {
             "year": meta["year"],

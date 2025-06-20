@@ -2,85 +2,14 @@ import json
 import logging
 import os
 import pathlib
-import re
-from typing import List, Protocol
+from typing import List
 
 import click
 import requests
 
+from lllminterface import LLMInterface, LMStudio
+
 tokenizer = None
-
-
-class LLMInterface(Protocol):
-    def chat(self, messages: List[dict], options: dict = None) -> str: ...
-
-
-class LMStudio:
-    def __init__(self, model_name: str = "qwen3:8b"):
-        self.model_name = model_name
-        self.api_url = "http://localhost:11234/v1/chat/completions"
-
-    def chat(self, messages: List[dict], options: dict = None) -> str:
-        if options is None:
-            options = {
-                "num_ctx": 40960,
-                "num_predict": 2048,
-                "temperature": 0.3,
-                "top_p": 0.8,
-                "top_k": 20,
-            }
-        data = {
-            "model": self.model_name,
-            "messages": messages,
-            "options": options,
-        }
-        try:
-            response = requests.post(self.api_url, json=data)
-            response.raise_for_status()
-            result_json = response.json()
-            return result_json["choices"][0]["message"]["content"]
-        except Exception as e:
-            logger.error(f"LMStudio.chat failed: {e}")
-            raise
-
-
-# === MLXLM class for LLMInterface compatibility ===
-class MLXLM:
-    def __init__(self, model_path: str = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"):
-        from mlx_lm import load
-
-        self.model, self.tokenizer = load(model_path)
-        self.prompt_cache = None
-
-    def chat(self, messages: List[dict], options: dict = None) -> str:
-        from mlx_lm import generate
-        from mlx_lm.models.cache import make_prompt_cache
-
-        if self.prompt_cache is None:
-            self.prompt_cache = make_prompt_cache(self.model)
-
-        prompt = self.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True
-        )
-
-        response = generate(
-            self.model,
-            self.tokenizer,
-            prompt=prompt,
-            verbose=False,
-            prompt_cache=self.prompt_cache,
-        )
-        return response
-
-
-def get_tokenizer(model_name):
-    global tokenizer
-    if tokenizer is None:
-        from transformers import AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8b")
-    return tokenizer
-
 
 # Configure logging
 logging.basicConfig(
@@ -96,67 +25,29 @@ OUTPUT_FOLDER = "./rag-chunks"
 CHECKPOINT_FILE = "checkpoint.json"
 
 
-def extract_topics(text: str, llm: LLMInterface) -> List[dict]:
-    """
-    Extracts a list of topics and their descriptions from the input text using
-    the provided LLMInterface.
-    """
-    logger.info("Extracting topics from transcript.")
-    prompt = f"""
-<context>
-/no_think
-You are a technical summarizer skilled at identifying the key themes in 
-developer-focused transcripts.
-</context>
-<task>
-List the main topics covered in the following transcript. For each topic, 
-provide:
-- A short title (2–5 words)
-- A one-sentence description summarizing what is discussed
+# def extract_json_from_text(text: str):
+#     """
+#     Extract the first JSON array found in the given text using regex.
+#     Strips markdown fences and whitespace before parsing.
+#     """
+#     logger.debug("Extracting JSON from text.")
 
-Return only a JSON array in the following format:
-[
-  {{
-    "topic": "Title of Topic",
-    "description": "One sentence summary of the topic"
-  }},
-  ...
-]
-</task>
-<input>{text}</input>
-"""
-    try:
-        response = llm.chat([{"role": "user", "content": prompt}])
-        topics = extract_json_from_text(response)
-        return topics
-    except Exception as e:
-        logger.error(f"Error extracting topics: {e}")
-        return []
+#     # Strip <think>*</think> tags if present
+#     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+#     # Strip ```json ... ``` fencing if present
+#     if text.startswith("```json"):
+#         text = text[len("```json") :].strip()
+#     if text.endswith("```"):
+#         text = text[: -len("```")].strip()
 
+#     # Now extract the JSON array (starting with [ and ending with ])
+#     json_array_pattern = re.compile(r"\[\s*{.*?}\s*\]", re.DOTALL)
+#     match = json_array_pattern.search(text)
+#     if not match:
+#         raise json.JSONDecodeError("No JSON array found", text, 0)
 
-def extract_json_from_text(text: str):
-    """
-    Extract the first JSON array found in the given text using regex.
-    Strips markdown fences and whitespace before parsing.
-    """
-    logger.debug("Extracting JSON from text.")
-
-    # Strip <think>*</think> tags if present
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    # Strip ```json ... ``` fencing if present
-    if text.startswith("```json"):
-        text = text[len("```json") :].strip()
-    if text.endswith("```"):
-        text = text[: -len("```")].strip()
-
-    # Now extract the JSON array (starting with [ and ending with ])
-    json_array_pattern = re.compile(r"\[\s*{.*?}\s*\]", re.DOTALL)
-    match = json_array_pattern.search(text)
-    if not match:
-        raise json.JSONDecodeError("No JSON array found", text, 0)
-
-    json_text = match.group(0)
-    return json.loads(json_text)
+#     json_text = match.group(0)
+#     return json.loads(json_text)
 
 
 # def extract_json_from_text(text: str):
@@ -420,7 +311,7 @@ def split_large_file(content: str, max_size: int, model_name: str) -> List[str]:
     return split_by_tokens(content, max_tokens=20000, model_name=model_name)
 
 
-def process_markdown_file(
+def process_content_block(
     file_path: str, output_folder: str, model_name: str, processed_files: list
 ):
     """Helper function to process a single markdown file."""
@@ -428,41 +319,13 @@ def process_markdown_file(
 
     start_time = time.time()
     filename = os.path.basename(file_path)
-    logger.info(f"Processing file: {filename}")
-    with open(file_path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    def extract_code_blocks_from_markdown(content: str) -> List[dict]:
-        pattern = re.compile(
-            r"--- Code Sample \d+ ---\s+\*\*Time\*\*: (.*?)\s+\*\*Title\*\*: (.*?)\n\n```swift\n(.*?)```",
-            re.DOTALL,
-        )
-        matches = pattern.findall(content)
-        return [
-            {"timestamp": ts.strip(), "title": title.strip(), "code": code.strip()}
-            for ts, title, code in matches
-        ]
-
+    logger.info(f"Processing content block in: {filename}")
     logger.info(f"Loaded content length: {len(content)} characters")
-
-    # Extract YEAR, TITLE, URL from header using regex
-    year, title, url = "", "", ""
-    header_match = re.search(
-        r"YEAR:\s*(.+)\nTITLE:\s*(.+)\nURL:\s*(.+)\n", content, re.IGNORECASE
-    )
-    if header_match:
-        year = header_match.group(1).strip()
-        title = header_match.group(2).strip()
-        url = header_match.group(3).strip()
-        logger.info(f"Extracted metadata - Year: {year}, Title: {title}, URL: {url}")
-    else:
-        logger.warning(f"Metadata not found in file: {filename}")
-
+    content = read_main_content(file_path=file_path)
     # Initialize LLM
     llm = LMStudio(model_name=model_name)
 
     # Process content with progressive splitting
-    logger.info(f"Processing content for file: {filename}")
     topics = extract_topics(content, llm=llm)
     if topics:
         logger.info("Extracted Topics:")
@@ -471,7 +334,7 @@ def process_markdown_file(
     else:
         logger.warning("No topics extracted.")
 
-    # # Use our new token-based approach with retries
+    # Use our new token-based approach with retries
     # all_chunks = process_with_retry(content, llm, model_name, max_retries=3)
 
     # # If processing completely failed, log an error
@@ -568,6 +431,34 @@ def process_all_markdown_files(
         )
 
 
+def read_main_content(file_path: str) -> str:
+    """
+    Reads the 'Main Content' chunk from the JSON file and returns its content.
+    """
+    logger.info(f"Reading 'Main Content' from file: {file_path}")
+    try:
+        with open(file_path, "r") as f:
+            data = json.load(f)
+
+        # Find the 'Main Content' chunk
+        main_content_chunk = next(
+            (
+                chunk
+                for chunk in data.get("chunks", [])
+                if chunk.get("title") == "Main Content"
+            ),
+            None,
+        )
+
+        if not main_content_chunk:
+            raise ValueError("'Main Content' chunk not found in the file.")
+
+        return main_content_chunk.get("content", "")
+    except Exception as e:
+        logger.error(f"Error reading 'Main Content': {e}")
+        return ""
+
+
 def process_single_markdown_file(
     input_folder: str,
     output_folder: str,
@@ -610,14 +501,54 @@ def process_single_markdown_file(
     process_file(file_path, model_name, force=force)
 
 
-def process_file(file_path: str, model_name: str, force: bool = False):
-    """Wrapper for processing a single markdown file."""
-    process_markdown_file(
-        file_path=file_path,
-        output_folder=OUTPUT_FOLDER,
-        model_name=model_name,
-        processed_files=list(load_progress_filecheck(INPUT_FOLDER, OUTPUT_FOLDER)),
-    )
+# def process_file(file_path: str, model_name: str, force: bool = False):
+#     """Wrapper for processing a single markdown file."""
+#     process_markdown_file(
+#         file_path=file_path,
+#         output_folder=OUTPUT_FOLDER,
+#         model_name=model_name,
+#         processed_files=list(load_progress_filecheck(INPUT_FOLDER, OUTPUT_FOLDER)),
+#     )
+def extract_topics(text: str, llm: LLMInterface) -> List[dict]:
+    """
+    Extracts a list of topics and their descriptions from the input text using
+    the provided LLMInterface.
+    """
+    logger.info("Extracting topics from transcript.")
+    prompt = f"""
+<context>
+/no_think
+You are a technical summarizer skilled at identifying the key themes in 
+developer-focused transcripts.
+</context>
+<task>
+List the main topics covered in the following transcript. For each topic, 
+provide:
+- A short title (2–5 words)
+- A one-sentence description summarizing what is discussed
+
+Return only a JSON array in the following format:
+[
+  {{
+    "topic": "Title of Topic",
+    "description": "One sentence summary of the topic"
+  }},
+  ...
+]
+</task>
+<input>{text}</input>
+"""
+    try:
+        response = llm.chat([{"role": "user", "content": prompt}])
+        topics = extract_json_from_text(response)
+        return topics
+    except Exception as e:
+        logger.error(f"Error extracting topics: {e}")
+        return []
+
+
+def chunk_by_topic(content: str, topics: dict):
+    pass
 
 
 @click.command()
@@ -668,18 +599,27 @@ def main(
             f"Processing single file: {target_file} "
             f"with model: {model_name} (force={force})"
         )
+        file_path = target_file
+        if not os.path.exists(file_path):
+            logger.error(f"File '{file_path}' does not exist.")
+            return
 
-        # Get list of already processed files to check against
-        processed_files = list(load_progress_filecheck(INPUT_FOLDER, OUTPUT_FOLDER))
-        if processed_files:
-            logger.info(f"Found {len(processed_files)} already processed files.")
-        process_single_markdown_file(
-            INPUT_FOLDER,
-            OUTPUT_FOLDER,
-            target_file,
-            model_name,
-            force=force,
-        )
+        content = read_main_content(file_path)
+        llm = LMStudio(model_name=model_name)
+        topics = extract_topics(content, llm=llm)
+
+        if topics:
+            print(json.dumps(topics, indent=2))
+        else:
+            logger.warning("No topics extracted.")
+
+        if topics_only:
+            logger.info("Running in topics-only mode.")
+            return
+
+        chunks = chunk_by_topic(content=content, topics=topics)
+        logger.info(f"{chunks}")
+
     else:
         logger.info(f"Starting processing with model: {model_name}")
         process_all_markdown_files(INPUT_FOLDER, OUTPUT_FOLDER, model_name)

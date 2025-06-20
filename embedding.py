@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-embed_to_pg.py
-
-Reads JSON chunk files from a directory, computes embeddings for each chunk,
-and inserts them into a Postgres table with pgvector support.
-"""
-
 import json
 import logging
 import os
@@ -32,7 +24,7 @@ CREATE TABLE IF NOT EXISTS {table} (
     chunk_title TEXT,
     chunk_summary TEXT,
     chunk_content TEXT,
-    embedding VECTOR
+    embedding VECTOR(384)
 );
 """
 
@@ -48,8 +40,16 @@ CREATE TABLE IF NOT EXISTS {table} (
 @click.option(
     "--db-url",
     "-u",
-    default=lambda: os.getenv("DATABASE_URL", "postgresql://localhost:5432/mydb"),
+    default=lambda: os.getenv(
+        "DATABASE_URL", "postgresql://admin:admin@localhost:5432/wwdc_vector"
+    ),
     help="Postgres connection URL or DSN",
+)
+@click.option(
+    "--reset",
+    is_flag=True,
+    default=False,
+    help="clears the database for fresh embeddings",
 )
 @click.option(
     "--table", "-t", default="rag_chunks", help="Target Postgres table for embeddings"
@@ -60,20 +60,23 @@ CREATE TABLE IF NOT EXISTS {table} (
     default="all-MiniLM-L6-v2",
     help="SentenceTransformer model name for embeddings",
 )
-def embed_and_load(dir, db_url, table, model):
+def embed_and_load(dir, db_url, reset: bool, table, model):
     """
     Iterate over JSON files under `dir`, compute embeddings for each chunk,
     and insert into Postgres table `table` using pgvector.
     """
     # Load embedding model
-    embedder = SentenceTransformer(model)
+    embedder = SentenceTransformer(model, truncate_dim=384)
     logger.info(f"Loaded embedding model: {model}")
 
     # Connect to Postgres
-    with psycopg.connect("postgresql://admin:admin@localhost:5432/wwdc_vector") as conn:
+    with psycopg.connect(db_url) as conn:
         logger.info("Connected to Postgres")
         register_vector(conn)
         with conn.cursor() as cur:
+            if reset:
+                logger.info(f"Clearning {table}")
+                SQL("DROP TABLE IF EXISTS {table}").format(table=Identifier(table))
             # Ensure table exists
             cur.execute(SQL(TABLE_SCHEMA).format(table=Identifier(table)))
             conn.commit()
@@ -94,12 +97,18 @@ def embed_and_load(dir, db_url, table, model):
                 chunks = doc.get("chunks", [])
 
                 for idx, chunk in enumerate(chunks):
+                    if chunk.get("type") == "transcript":
+                        continue
                     chunk_title = chunk.get("title")
                     summary = chunk.get("summary")
                     content = chunk.get("content", "")
 
                     # Compute embedding (normalized)
-                    embedding = embedder.encode(content, normalize_embeddings=True)
+                    embedding = embedder.encode(
+                        content,
+                        normalize_embeddings=True,
+                        show_progress_bar=False,
+                    )
 
                     # Insert row
                     cur.execute(
