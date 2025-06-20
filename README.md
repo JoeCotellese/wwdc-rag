@@ -2,6 +2,8 @@
 
 A set of tools for converting WWDC (Apple Worldwide Developers Conference) talk transcripts into optimized chunks for Retrieval-Augmented Generation (RAG) applications, using LM Studio and local language models.
 
+![Demo](demo.gif)
+
 ## Overview
 
 This project demonstrates how to prepare documents for RAG applications with proper metadata preservation. It focuses specifically on WWDC talk transcripts but can be adapted for other document types.
